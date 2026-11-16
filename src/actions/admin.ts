@@ -5,6 +5,7 @@ import { getTranslations } from 'next-intl/server';
 import prisma from '@/lib/prisma';
 import { v2 as cloudinary } from 'cloudinary';
 import { requireAdmin } from '@/lib/auth';
+import { getCloudinaryFolder } from '@/lib/cloudinary';
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME || process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME,
@@ -23,7 +24,7 @@ export async function uploadImage(formData: FormData) {
 
   return new Promise<string>((resolve, reject) => {
     cloudinary.uploader.upload_stream(
-      { folder: 'topkaminbrennstoffe' },
+      { folder: getCloudinaryFolder() },
       (error, result) => {
         if (error || !result) {
           console.error("Erreur d'upload Cloudinary:", error);

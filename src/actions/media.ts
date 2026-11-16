@@ -4,6 +4,7 @@ import prisma from '@/lib/prisma';
 import { requireAdmin } from '@/lib/auth';
 import { revalidatePath } from 'next/cache';
 import { v2 as cloudinary } from 'cloudinary';
+import { getCloudinaryFolder } from '@/lib/cloudinary';
 
 // Configure Cloudinary
 cloudinary.config({
@@ -153,7 +154,7 @@ export async function uploadMediaAction(formData: FormData) {
 
     const secureUrl = await new Promise<string>((resolve, reject) => {
       cloudinary.uploader.upload_stream(
-        { folder: 'topkaminbrennstoffe/media' },
+        { folder: getCloudinaryFolder('media') },
         (error, result) => {
           if (error || !result) reject(error);
           else resolve(result.secure_url);
@@ -213,7 +214,7 @@ export async function uploadMultipleMediaAction(formData: FormData) {
 
         const secureUrl = await new Promise<string>((resolve, reject) => {
           cloudinary.uploader.upload_stream(
-            { folder: 'topkaminbrennstoffe/media' },
+            { folder: getCloudinaryFolder('media') },
             (error, result) => {
               if (error || !result) reject(error);
               else resolve(result.secure_url);

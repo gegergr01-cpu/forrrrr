@@ -6,6 +6,7 @@ import { requireAdmin } from '@/lib/auth';
 import { revalidatePath } from 'next/cache';
 import { v2 as cloudinary } from 'cloudinary';
 import { getTranslations } from 'next-intl/server';
+import { getCloudinaryFolder } from '@/lib/cloudinary';
 
 // Configure Cloudinary
 cloudinary.config({
@@ -27,7 +28,7 @@ async function uploadImageFromUrlToCloudinary(imageUrl: string): Promise<string 
 
     return new Promise<string>((resolve, reject) => {
       cloudinary.uploader.upload_stream(
-        { folder: 'lenha/woocommerce-import' },
+        { folder: getCloudinaryFolder('woocommerce-import') },
         (error, result) => {
           if (error || !result) {
             console.error("Cloudinary upload error:", error);
@@ -51,7 +52,7 @@ async function uploadImageFromUrlToCloudinary(imageUrl: string): Promise<string 
 function extractRankMathSEO(
   metaData: any[],
   item: { name?: string; title?: string; description?: string; short_description?: string; price?: string | number },
-  storeName: string = 'Lenha & Carvão Silva Dias'
+  storeName: string = process.env.NEXT_PUBLIC_STORE_NAME || 'Foron Hausgeräte'
 ) {
   if (!Array.isArray(metaData)) {
     return { metaTitle: null, metaDescription: null, metaKeywords: null, gtin: null };
@@ -228,6 +229,34 @@ export type WcProductImportItemResult = {
   error?: string;
   image?: string | null;
   price?: string | number;
+};
+
+export type WcPageImportItemResult = {
+  id: number | string;
+  title: string;
+  slug: string;
+  status: 'SUCCESS' | 'ALREADY_EXISTS' | 'FAILED';
+  isPublished: boolean;
+  error?: string;
+};
+
+export type WcArticleImportItemResult = {
+  id: number | string;
+  title: string;
+  slug: string;
+  image?: string | null;
+  status: 'SUCCESS' | 'ALREADY_EXISTS' | 'FAILED';
+  isPublished: boolean;
+  error?: string;
+};
+
+export type WcMediaImportItemResult = {
+  id: number | string;
+  title: string;
+  url: string;
+  mimeType?: string;
+  status: 'SUCCESS' | 'ALREADY_EXISTS' | 'FAILED';
+  error?: string;
 };
 
 export interface ProcessWcProductsResult {
@@ -496,7 +525,11 @@ export async function importWooCommerceCategories(
     }
 
     revalidatePath('/admin/categories');
-    return { success: true, count: categoriesToImport.length };
+    return { 
+      success: true, 
+      count: categoriesToImport.length,
+      categories: categoriesToImport.map(c => ({ id: c.id, name: c.name, slug: c.slug }))
+    };
 
   } catch (error: any) {
     console.error('Error importing categories from WooCommerce:', error);
@@ -1194,7 +1227,7 @@ export async function importWooCommerceOrders(
 }
 
 /**
- * Import WordPress Pages
+ * Import WordPress Pages (Complete 100% Import with SEO and fallbacks)
  */
 export async function importWordPressPages(
   url: string,
@@ -1206,22 +1239,52 @@ export async function importWordPressPages(
   const apiUrl = `${baseUrl}/wp-json/wp/v2/pages`;
 
   try {
-    let totalImported = 0;
+    const results: WcPageImportItemResult[] = [];
     let page = 1;
     let hasMore = true;
+    const authHeader = {
+      'Authorization': 'Basic ' + Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64'),
+      'Content-Type': 'application/json'
+    };
+    let useAuth = true;
 
-    while (hasMore && page <= 10) {
-      const response = await fetch(`${apiUrl}?per_page=100&page=${page}`, {
-        headers: {
-          'Authorization': 'Basic ' + Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64'),
-          'Content-Type': 'application/json'
-        },
-        cache: 'no-store'
-      });
+    while (hasMore) {
+      let response: Response;
+
+      const tryFetch = async (endpoint: string, includeAuth: boolean) => {
+        return await fetch(endpoint, {
+          headers: includeAuth ? authHeader : { 'Content-Type': 'application/json' },
+          cache: 'no-store'
+        });
+      };
+
+      // 1. Try to fetch all pages including drafts/private if authorized
+      let currentUrl = `${apiUrl}?per_page=100&page=${page}&status=any`;
+      response = await tryFetch(currentUrl, useAuth);
+
+      // If status=any rejected (400), try standard request
+      if (!response.ok && response.status === 400) {
+        currentUrl = `${apiUrl}?per_page=100&page=${page}`;
+        response = await tryFetch(currentUrl, useAuth);
+      }
+
+      // If 401 Unauthorized, fallback without Authorization header (public REST)
+      if (!response.ok && response.status === 401 && useAuth) {
+        useAuth = false;
+        currentUrl = `${apiUrl}?per_page=100&page=${page}`;
+        response = await tryFetch(currentUrl, false);
+      }
 
       if (!response.ok) {
-        throw new Error(`Erreur API WordPress Pages: ${response.status} ${response.statusText}`);
+        if (response.status === 400 || response.status === 404) {
+          hasMore = false;
+          break;
+        }
+        throw new Error(`Erreur API WordPress Pages (${response.status}): ${response.statusText}`);
       }
+
+      const totalPagesHeader = response.headers.get('x-wp-totalpages');
+      const maxPages = totalPagesHeader ? parseInt(totalPagesHeader, 10) : null;
 
       const pages = await response.json();
       if (!Array.isArray(pages) || pages.length === 0) {
@@ -1230,40 +1293,89 @@ export async function importWordPressPages(
       }
 
       for (const wpPage of pages) {
-        const title = unescapeHtml(wpPage.title?.rendered || '');
-        const slug = wpPage.slug || slugify(title);
-        const content = wpPage.content?.rendered || '';
+        try {
+          const title = unescapeHtml(wpPage.title?.rendered || `Page #${wpPage.id}`);
+          const rawSlug = wpPage.slug || slugify(title) || `page-${wpPage.id}`;
+          const content = wpPage.content?.rendered || '';
+          const excerpt = unescapeHtml(wpPage.excerpt?.rendered || '');
 
-        await prisma.page.upsert({
-          where: { slug },
-          update: {
+          const seoData = extractRankMathSEO(wpPage.meta || wpPage.meta_data || [], { title, description: excerpt });
+          const metaTitle = seoData.metaTitle || wpPage.yoast_head_json?.title || title;
+          const metaDescription = seoData.metaDescription || wpPage.yoast_head_json?.description || excerpt.slice(0, 160) || null;
+
+          const existing = await prisma.page.findUnique({
+            where: { slug: rawSlug }
+          });
+
+          const isPublished = wpPage.status === 'publish';
+
+          await prisma.page.upsert({
+            where: { slug: rawSlug },
+            update: {
+              title,
+              desktopContent: content,
+              mobileContent: content,
+              isPublished,
+              metaTitle,
+              metaDescription
+            },
+            create: {
+              title,
+              slug: rawSlug,
+              desktopContent: content,
+              mobileContent: content,
+              isPublished,
+              metaTitle,
+              metaDescription
+            }
+          });
+
+          results.push({
+            id: wpPage.id,
             title,
-            desktopContent: content,
-            mobileContent: content,
-            isPublished: wpPage.status === 'publish',
-            metaTitle: title,
-            metaDescription: unescapeHtml(wpPage.excerpt?.rendered || '').slice(0, 160)
-          },
-          create: {
-            title,
-            slug,
-            desktopContent: content,
-            mobileContent: content,
-            isPublished: wpPage.status === 'publish',
-            metaTitle: title,
-            metaDescription: unescapeHtml(wpPage.excerpt?.rendered || '').slice(0, 160)
-          }
-        });
-        totalImported++;
+            slug: rawSlug,
+            status: existing ? 'ALREADY_EXISTS' : 'SUCCESS',
+            isPublished
+          });
+        } catch (itemErr: any) {
+          console.error(`Erreur import page WP ${wpPage.id}:`, itemErr);
+          results.push({
+            id: wpPage.id,
+            title: wpPage.title?.rendered || `Page #${wpPage.id}`,
+            slug: wpPage.slug || `page-${wpPage.id}`,
+            status: 'FAILED',
+            isPublished: false,
+            error: itemErr.message || "Erreur d'enregistrement"
+          });
+        }
       }
-      page++;
+
+      if (maxPages !== null && page >= maxPages) {
+        hasMore = false;
+      } else if (pages.length < 100) {
+        hasMore = false;
+      } else {
+        page++;
+      }
     }
 
     revalidatePath('/admin/pages');
-    return { success: true, count: totalImported };
+    const successCount = results.filter(r => r.status === 'SUCCESS').length;
+    const alreadyExistsCount = results.filter(r => r.status === 'ALREADY_EXISTS').length;
+    const failedCount = results.filter(r => r.status === 'FAILED').length;
+
+    return {
+      success: true,
+      count: successCount + alreadyExistsCount,
+      total: results.length,
+      successCount,
+      alreadyExistsCount,
+      failedCount,
+      results
+    };
   } catch (error: any) {
     console.error('Error importing WordPress pages:', error);
-    return { success: false, message: error.message || 'Erreur lors de l\'import des pages.' };
+    return { success: false, message: error.message || 'Erreur lors de l\'import des pages.', results: [] };
   }
 }
 
@@ -1280,22 +1392,40 @@ export async function importWordPressArticles(
   const apiUrl = `${baseUrl}/wp-json/wp/v2/posts?_embed=true`;
 
   try {
-    let totalImported = 0;
+    const results: WcArticleImportItemResult[] = [];
     let page = 1;
     let hasMore = true;
+    const authHeader = {
+      'Authorization': 'Basic ' + Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64'),
+      'Content-Type': 'application/json'
+    };
+    let useAuth = true;
 
-    while (hasMore && page <= 10) {
-      const response = await fetch(`${apiUrl}&per_page=100&page=${page}`, {
-        headers: {
-          'Authorization': 'Basic ' + Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64'),
-          'Content-Type': 'application/json'
-        },
+    while (hasMore) {
+      const currentUrl = `${apiUrl}&per_page=100&page=${page}`;
+      let response = await fetch(currentUrl, {
+        headers: useAuth ? authHeader : { 'Content-Type': 'application/json' },
         cache: 'no-store'
       });
 
-      if (!response.ok) {
-        throw new Error(`Erreur API WordPress Posts: ${response.status} ${response.statusText}`);
+      if (!response.ok && response.status === 401 && useAuth) {
+        useAuth = false;
+        response = await fetch(currentUrl, {
+          headers: { 'Content-Type': 'application/json' },
+          cache: 'no-store'
+        });
       }
+
+      if (!response.ok) {
+        if (response.status === 400 || response.status === 404) {
+          hasMore = false;
+          break;
+        }
+        throw new Error(`Erreur API WordPress Posts (${response.status}): ${response.statusText}`);
+      }
+
+      const totalPagesHeader = response.headers.get('x-wp-totalpages');
+      const maxPages = totalPagesHeader ? parseInt(totalPagesHeader, 10) : null;
 
       const posts = await response.json();
       if (!Array.isArray(posts) || posts.length === 0) {
@@ -1304,50 +1434,250 @@ export async function importWordPressArticles(
       }
 
       for (const wpPost of posts) {
-        const title = unescapeHtml(wpPost.title?.rendered || '');
-        const slug = wpPost.slug || slugify(title);
-        const content = wpPost.content?.rendered || '';
-        const excerpt = unescapeHtml(wpPost.excerpt?.rendered || '');
+        try {
+          const title = unescapeHtml(wpPost.title?.rendered || `Article #${wpPost.id}`);
+          const slug = wpPost.slug || slugify(title) || `post-${wpPost.id}`;
+          const content = wpPost.content?.rendered || '';
+          const excerpt = unescapeHtml(wpPost.excerpt?.rendered || '');
 
-        let imageUrl: string | null = null;
-        const mediaSource = wpPost._embedded?.['wp:featuredmedia']?.[0]?.source_url;
-        if (mediaSource) {
-          imageUrl = await uploadImageFromUrlToCloudinary(mediaSource);
-        }
+          let imageUrl: string | null = null;
+          const mediaSource = wpPost._embedded?.['wp:featuredmedia']?.[0]?.source_url;
+          if (mediaSource) {
+            imageUrl = await uploadImageFromUrlToCloudinary(mediaSource);
+          }
 
-        await prisma.article.upsert({
-          where: { slug },
-          update: {
-            title,
-            content,
-            excerpt,
-            image: imageUrl,
-            isPublished: wpPost.status === 'publish',
-            metaTitle: title,
-            metaDescription: excerpt.slice(0, 160)
-          },
-          create: {
+          const existing = await prisma.article.findUnique({
+            where: { slug }
+          });
+
+          const isPublished = wpPost.status === 'publish';
+
+          await prisma.article.upsert({
+            where: { slug },
+            update: {
+              title,
+              content,
+              excerpt,
+              image: imageUrl || existing?.image,
+              isPublished,
+              metaTitle: title,
+              metaDescription: excerpt.slice(0, 160)
+            },
+            create: {
+              title,
+              slug,
+              content,
+              excerpt,
+              image: imageUrl,
+              isPublished,
+              metaTitle: title,
+              metaDescription: excerpt.slice(0, 160)
+            }
+          });
+
+          results.push({
+            id: wpPost.id,
             title,
             slug,
-            content,
-            excerpt,
-            image: imageUrl,
-            isPublished: wpPost.status === 'publish',
-            metaTitle: title,
-            metaDescription: excerpt.slice(0, 160)
-          }
-        });
-        totalImported++;
+            image: imageUrl || existing?.image || null,
+            status: existing ? 'ALREADY_EXISTS' : 'SUCCESS',
+            isPublished
+          });
+        } catch (itemErr: any) {
+          console.error(`Erreur import article WP ${wpPost.id}:`, itemErr);
+          results.push({
+            id: wpPost.id,
+            title: wpPost.title?.rendered || `Article #${wpPost.id}`,
+            slug: wpPost.slug || `post-${wpPost.id}`,
+            status: 'FAILED',
+            isPublished: false,
+            error: itemErr.message || "Erreur d'enregistrement"
+          });
+        }
       }
-      page++;
+
+      if (maxPages !== null && page >= maxPages) {
+        hasMore = false;
+      } else if (posts.length < 100) {
+        hasMore = false;
+      } else {
+        page++;
+      }
     }
 
     revalidatePath('/admin/blogs');
     revalidatePath('/blog');
-    return { success: true, count: totalImported };
+    const successCount = results.filter(r => r.status === 'SUCCESS').length;
+    const alreadyExistsCount = results.filter(r => r.status === 'ALREADY_EXISTS').length;
+    const failedCount = results.filter(r => r.status === 'FAILED').length;
+
+    return {
+      success: true,
+      count: successCount + alreadyExistsCount,
+      total: results.length,
+      successCount,
+      alreadyExistsCount,
+      failedCount,
+      results
+    };
   } catch (error: any) {
     console.error('Error importing WordPress articles:', error);
-    return { success: false, message: error.message || 'Erreur lors de l\'import des articles.' };
+    return { success: false, message: error.message || 'Erreur lors de l\'import des articles.', results: [] };
+  }
+}
+
+/**
+ * Import WordPress Media Library (Images, Documents)
+ */
+export async function importWordPressMedia(
+  url: string,
+  consumerKey: string,
+  consumerSecret: string,
+  maxMedia: number = 200
+) {
+  await requireAdmin();
+  const baseUrl = url.replace(/\/$/, '');
+  const apiUrl = `${baseUrl}/wp-json/wp/v2/media`;
+
+  try {
+    const results: WcMediaImportItemResult[] = [];
+    let page = 1;
+    let hasMore = true;
+    const authHeader = {
+      'Authorization': 'Basic ' + Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64'),
+      'Content-Type': 'application/json'
+    };
+    let useAuth = true;
+
+    while (hasMore && results.length < maxMedia) {
+      const currentUrl = `${apiUrl}?per_page=50&page=${page}`;
+      let response = await fetch(currentUrl, {
+        headers: useAuth ? authHeader : { 'Content-Type': 'application/json' },
+        cache: 'no-store'
+      });
+
+      if (!response.ok && response.status === 401 && useAuth) {
+        useAuth = false;
+        response = await fetch(currentUrl, {
+          headers: { 'Content-Type': 'application/json' },
+          cache: 'no-store'
+        });
+      }
+
+      if (!response.ok) {
+        if (response.status === 400 || response.status === 404) {
+          hasMore = false;
+          break;
+        }
+        throw new Error(`Erreur API WordPress Media (${response.status}): ${response.statusText}`);
+      }
+
+      const mediaItems = await response.json();
+      if (!Array.isArray(mediaItems) || mediaItems.length === 0) {
+        hasMore = false;
+        break;
+      }
+
+      for (const item of mediaItems) {
+        if (results.length >= maxMedia) {
+          hasMore = false;
+          break;
+        }
+
+        try {
+          const sourceUrl = item.source_url || item.guid?.rendered;
+          if (!sourceUrl) continue;
+
+          const title = unescapeHtml(item.title?.rendered || `media-${item.id}`);
+          const altText = item.alt_text || null;
+          const description = unescapeHtml(item.description?.rendered || '') || null;
+          const legend = unescapeHtml(item.caption?.rendered || '') || null;
+
+          const existing = await prisma.media.findFirst({
+            where: {
+              OR: [
+                { link: sourceUrl },
+                { url: sourceUrl }
+              ]
+            }
+          });
+
+          if (existing) {
+            results.push({
+              id: item.id,
+              title,
+              url: existing.url,
+              mimeType: item.mime_type,
+              status: 'ALREADY_EXISTS'
+            });
+            continue;
+          }
+
+          let finalUrl = sourceUrl;
+          try {
+            const uploadedUrl = await uploadImageFromUrlToCloudinary(sourceUrl);
+            if (uploadedUrl) {
+              finalUrl = uploadedUrl;
+            }
+          } catch (upErr) {
+            console.warn(`Media Cloudinary upload failed for ${sourceUrl}, using original url`, upErr);
+          }
+
+          const created = await prisma.media.create({
+            data: {
+              url: finalUrl,
+              title,
+              altText,
+              description,
+              legend,
+              link: sourceUrl
+            }
+          });
+
+          results.push({
+            id: item.id,
+            title,
+            url: created.url,
+            mimeType: item.mime_type,
+            status: 'SUCCESS'
+          });
+        } catch (itemErr: any) {
+          console.error(`Erreur import media WP ${item.id}:`, itemErr);
+          results.push({
+            id: item.id,
+            title: item.title?.rendered || `Media #${item.id}`,
+            url: item.source_url || '',
+            mimeType: item.mime_type,
+            status: 'FAILED',
+            error: itemErr.message || "Erreur d'enregistrement"
+          });
+        }
+      }
+
+      if (mediaItems.length < 50) {
+        hasMore = false;
+      } else {
+        page++;
+      }
+    }
+
+    revalidatePath('/admin/media');
+    const successCount = results.filter(r => r.status === 'SUCCESS').length;
+    const alreadyExistsCount = results.filter(r => r.status === 'ALREADY_EXISTS').length;
+    const failedCount = results.filter(r => r.status === 'FAILED').length;
+
+    return {
+      success: true,
+      count: successCount + alreadyExistsCount,
+      total: results.length,
+      successCount,
+      alreadyExistsCount,
+      failedCount,
+      results
+    };
+  } catch (error: any) {
+    console.error('Error importing WordPress media:', error);
+    return { success: false, message: error.message || 'Erreur lors de l\'import des médias.', results: [] };
   }
 }
 

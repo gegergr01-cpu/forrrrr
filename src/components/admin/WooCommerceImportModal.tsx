@@ -4,9 +4,9 @@ import { useState, useRef, useEffect, useMemo } from 'react';
 import { useTranslations } from 'next-intl';
 import Image from 'next/image';
 import { useRouter } from 'next/navigation';
-import { 
-  countWooCommerceProducts, 
-  importWooCommerceProductsBatch, 
+import {
+  countWooCommerceProducts,
+  importWooCommerceProductsBatch,
   importWooCommerceCategories,
   fetchWooCommerceCategoriesList,
   fetchWooCommerceProductsList,
@@ -15,9 +15,13 @@ import {
   importWooCommerceOrders,
   importWordPressPages,
   importWordPressArticles,
+  importWordPressMedia,
   importWooCommerceShipping,
   syncWooCommerceRankMathSEO,
-  type WcProductImportItemResult
+  type WcProductImportItemResult,
+  type WcPageImportItemResult,
+  type WcArticleImportItemResult,
+  type WcMediaImportItemResult
 } from '@/actions/woocommerce';
 
 type ImportMode = 'ALL' | 'CATEGORIES' | 'INDIVIDUAL' | 'SEO_SYNC';
@@ -30,13 +34,13 @@ export default function WooCommerceImportModal() {
   const [isOpen, setIsOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [fetchingRemote, setFetchingRemote] = useState(false);
-  
+
   // Credentials
   const [url, setUrl] = useState('');
   const [consumerKey, setConsumerKey] = useState('');
   const [consumerSecret, setConsumerSecret] = useState('');
   const [credentialsVerified, setCredentialsVerified] = useState(false);
-  
+
   // Mode
   const [importMode, setImportMode] = useState<ImportMode>('ALL');
 
@@ -45,12 +49,25 @@ export default function WooCommerceImportModal() {
   const [includeOrders, setIncludeOrders] = useState(true);
   const [includePages, setIncludePages] = useState(true);
   const [includeArticles, setIncludeArticles] = useState(true);
+  const [includeMedia, setIncludeMedia] = useState(true);
+  const [currentStepText, setCurrentStepText] = useState<string>('');
 
   // Additional Imported Stats for Summary
   const [shippingSummary, setShippingSummary] = useState<{ zones: number; methods: number } | null>(null);
   const [ordersImportedCount, setOrdersImportedCount] = useState<number | null>(null);
   const [pagesImportedCount, setPagesImportedCount] = useState<number | null>(null);
   const [articlesImportedCount, setArticlesImportedCount] = useState<number | null>(null);
+  const [mediaImportedCount, setMediaImportedCount] = useState<number | null>(null);
+
+  // Detailed Summary Collections
+  const [categoriesSummary, setCategoriesSummary] = useState<Array<{ id: number; name: string; slug: string }>>([]);
+  const [pagesResults, setPagesResults] = useState<WcPageImportItemResult[]>([]);
+  const [articlesResults, setArticlesResults] = useState<WcArticleImportItemResult[]>([]);
+  const [mediaResults, setMediaResults] = useState<WcMediaImportItemResult[]>([]);
+
+  type SummarySectionTab = 'PRODUCTS' | 'PAGES' | 'ARTICLES' | 'MEDIA' | 'CATEGORIES' | 'SHIPPING';
+  const [activeSummaryTab, setActiveSummaryTab] = useState<SummarySectionTab>('PRODUCTS');
+  const [copiedFullReport, setCopiedFullReport] = useState(false);
 
   // Categories Selection State
   const [availableCategories, setAvailableCategories] = useState<Array<{ id: number; name: string; count: number; slug: string }>>([]);
@@ -114,6 +131,13 @@ export default function WooCommerceImportModal() {
     setOrdersImportedCount(null);
     setPagesImportedCount(null);
     setArticlesImportedCount(null);
+    setMediaImportedCount(null);
+    setCategoriesSummary([]);
+    setPagesResults([]);
+    setArticlesResults([]);
+    setMediaResults([]);
+    setCurrentStepText('');
+    setActiveSummaryTab('PRODUCTS');
   };
 
   // Step 1: Connect and load categories / products metadata
@@ -174,14 +198,14 @@ export default function WooCommerceImportModal() {
 
   // Toggle Category selection
   const toggleCategory = (catId: number) => {
-    setSelectedCategoryIds(prev => 
+    setSelectedCategoryIds(prev =>
       prev.includes(catId) ? prev.filter(id => id !== catId) : [...prev, catId]
     );
   };
 
   // Toggle Product selection
   const toggleProduct = (prodId: number) => {
-    setSelectedProductIds(prev => 
+    setSelectedProductIds(prev =>
       prev.includes(prodId) ? prev.filter(id => id !== prodId) : [...prev, prodId]
     );
   };
@@ -233,7 +257,8 @@ export default function WooCommerceImportModal() {
     }
 
     try {
-      // 0. Synchroniser les catégories : si mode 'CATEGORIES', synchroniser uniquement les catégories sélectionnées
+      // 0. Synchroniser les catégories préalables (requis pour lier les produits)
+      setCurrentStepText('Synchronisation des catégories...');
       setImportingCategories(true);
       const catIdsToSync = importMode === 'CATEGORIES' ? selectedCategoryIds : undefined;
       const catRes = await importWooCommerceCategories(url, consumerKey, consumerSecret, catIdsToSync);
@@ -244,54 +269,14 @@ export default function WooCommerceImportModal() {
         setLoading(false);
         return;
       }
-
-      // 0.1 Importer les zones et options de livraison
-      if (includeShipping) {
-        try {
-          const shipRes = await importWooCommerceShipping(url, consumerKey, consumerSecret);
-          if (shipRes.success) {
-            setShippingSummary({ zones: shipRes.zonesCount || 0, methods: shipRes.methodsCount || 0 });
-          }
-        } catch (shipErr) {
-          console.error('Erreur import livraison:', shipErr);
-        }
+      if (catRes.categories) {
+        setCategoriesSummary(catRes.categories);
       }
 
-      // 0.2 Importer les commandes
-      if (includeOrders) {
-        try {
-          const ordRes = await importWooCommerceOrders(url, consumerKey, consumerSecret);
-          if (ordRes.success) {
-            setOrdersImportedCount(ordRes.count || 0);
-          }
-        } catch (ordErr) {
-          console.error('Erreur import commandes:', ordErr);
-        }
-      }
-
-      // 0.3 Importer les pages institutionnelles
-      if (includePages) {
-        try {
-          const pgsRes = await importWordPressPages(url, consumerKey, consumerSecret);
-          if (pgsRes.success) {
-            setPagesImportedCount(pgsRes.count || 0);
-          }
-        } catch (pgsErr) {
-          console.error('Erreur import pages:', pgsErr);
-        }
-      }
-
-      // 0.4 Importer les articles de blog
-      if (includeArticles) {
-        try {
-          const artRes = await importWordPressArticles(url, consumerKey, consumerSecret);
-          if (artRes.success) {
-            setArticlesImportedCount(artRes.count || 0);
-          }
-        } catch (artErr) {
-          console.error('Erreur import articles:', artErr);
-        }
-      }
+      // ==========================================
+      // ÉTAPE 1 : IMPORTATION DES PRODUITS
+      // ==========================================
+      setCurrentStepText('Étape 1 : Importation des produits...');
 
       // Case A: Import Individual Products
       if (importMode === 'INDIVIDUAL') {
@@ -303,7 +288,7 @@ export default function WooCommerceImportModal() {
 
         setTotalProducts(selectedProductIds.length);
         const importRes = await importWooCommerceSelectedProducts(url, consumerKey, consumerSecret, selectedProductIds);
-        
+
         if (!importRes.success) {
           setResultMessage({ type: 'error', text: t('import_error') + ': ' + importRes.message });
           setLoading(false);
@@ -321,98 +306,160 @@ export default function WooCommerceImportModal() {
         setLiveAlreadyExistsCount(currentAlreadyExists);
         setLiveFailedCount(currentFailed);
         setImportedProducts(newItems.length);
-
-        // Open summary completion modal
-        setSummaryStats({
-          success: currentSuccess,
-          alreadyExists: currentAlreadyExists,
-          failed: currentFailed,
-          total: newItems.length
-        });
-        setSummaryTabFilter(currentFailed > 0 ? 'FAILED' : 'ALL');
-        setShowSummaryModal(true);
-        setSelectedProductIds([]);
-        await handleSearchProducts(productPage);
-        return;
-      }
-
-      // Case B: Import By Category or ALL
-      const catFilter = importMode === 'CATEGORIES' ? selectedCategoryIds : undefined;
-      if (importMode === 'CATEGORIES' && selectedCategoryIds.length === 0) {
-        setResultMessage({ type: 'error', text: 'Veuillez sélectionner au moins une catégorie.' });
-        setLoading(false);
-        return;
-      }
-
-      const countRes = await countWooCommerceProducts(url, consumerKey, consumerSecret, catFilter);
-      if (!countRes.success || countRes.total === undefined) {
-        setResultMessage({ type: 'error', text: t('import_error') + ': ' + countRes.message });
-        setLoading(false);
-        return;
-      }
-
-      const total = countRes.total;
-      setTotalProducts(total);
-
-      if (total === 0) {
-        setSummaryStats({ success: 0, alreadyExists: 0, failed: 0, total: 0 });
-        setSummaryTabFilter('ALL');
-        setShowSummaryModal(true);
-        setLoading(false);
-        return;
-      }
-
-      // Import batch by batch
-      const perPage = 2; // 2 par 2 pour progression fluide et réactive sans timeout
-      const totalPages = Math.ceil(total / perPage);
-
-      for (let page = 1; page <= totalPages; page++) {
-        if (typeof window !== 'undefined') {
-          window.dispatchEvent(new Event('user-activity'));
+      } else {
+        // Case B: Import By Category or ALL
+        const catFilter = importMode === 'CATEGORIES' ? selectedCategoryIds : undefined;
+        if (importMode === 'CATEGORIES' && selectedCategoryIds.length === 0) {
+          setResultMessage({ type: 'error', text: 'Veuillez sélectionner au moins une catégorie.' });
+          setLoading(false);
+          return;
         }
 
-        try {
-          const batchRes = await importWooCommerceProductsBatch(url, consumerKey, consumerSecret, page, perPage, catFilter);
-          if (batchRes.success && batchRes.results) {
-            accumulatedLogs = [...accumulatedLogs, ...batchRes.results];
-            currentSuccess += (batchRes.successCount || 0);
-            currentAlreadyExists += (batchRes.alreadyExistsCount || 0);
-            currentFailed += (batchRes.failedCount || 0);
+        const countRes = await countWooCommerceProducts(url, consumerKey, consumerSecret, catFilter);
+        if (!countRes.success || countRes.total === undefined) {
+          setResultMessage({ type: 'error', text: t('import_error') + ': ' + countRes.message });
+          setLoading(false);
+          return;
+        }
 
-            setImportLogs([...accumulatedLogs]);
-            setLiveSuccessCount(currentSuccess);
-            setLiveAlreadyExistsCount(currentAlreadyExists);
-            setLiveFailedCount(currentFailed);
-            setImportedProducts(accumulatedLogs.length);
-          } else if (!batchRes.success) {
-            currentFailed++;
-            const failedBatchItem: WcProductImportItemResult = {
-              id: page,
-              name: `Lot #${page}`,
-              status: 'FAILED',
-              error: batchRes.message || 'Erreur lors du traitement du lot'
-            };
-            accumulatedLogs = [...accumulatedLogs, failedBatchItem];
-            setImportLogs([...accumulatedLogs]);
-            setLiveFailedCount(currentFailed);
-            setImportedProducts(accumulatedLogs.length);
+        const total = countRes.total;
+        setTotalProducts(total);
+
+        if (total > 0) {
+          const perPage = 2; // 2 par 2 pour progression fluide et réactive sans timeout
+          const totalPages = Math.ceil(total / perPage);
+
+          for (let page = 1; page <= totalPages; page++) {
+            if (typeof window !== 'undefined') {
+              window.dispatchEvent(new Event('user-activity'));
+            }
+
+            try {
+              const batchRes = await importWooCommerceProductsBatch(url, consumerKey, consumerSecret, page, perPage, catFilter);
+              if (batchRes.success && batchRes.results) {
+                accumulatedLogs = [...accumulatedLogs, ...batchRes.results];
+                currentSuccess += (batchRes.successCount || 0);
+                currentAlreadyExists += (batchRes.alreadyExistsCount || 0);
+                currentFailed += (batchRes.failedCount || 0);
+
+                setImportLogs([...accumulatedLogs]);
+                setLiveSuccessCount(currentSuccess);
+                setLiveAlreadyExistsCount(currentAlreadyExists);
+                setLiveFailedCount(currentFailed);
+                setImportedProducts(accumulatedLogs.length);
+              } else if (!batchRes.success) {
+                currentFailed++;
+                const failedBatchItem: WcProductImportItemResult = {
+                  id: page,
+                  name: `Lot #${page}`,
+                  status: 'FAILED',
+                  error: batchRes.message || 'Erreur lors du traitement du lot'
+                };
+                accumulatedLogs = [...accumulatedLogs, failedBatchItem];
+                setImportLogs([...accumulatedLogs]);
+                setLiveFailedCount(currentFailed);
+                setImportedProducts(accumulatedLogs.length);
+              }
+            } catch (batchErr: any) {
+              currentFailed++;
+              const failedBatchItem: WcProductImportItemResult = {
+                id: page,
+                name: `Lot #${page}`,
+                status: 'FAILED',
+                error: batchErr?.message || 'Erreur réseau ou délai dépassé'
+              };
+              accumulatedLogs = [...accumulatedLogs, failedBatchItem];
+              setImportLogs([...accumulatedLogs]);
+              setLiveFailedCount(currentFailed);
+              setImportedProducts(accumulatedLogs.length);
+            }
           }
-        } catch (batchErr: any) {
-          currentFailed++;
-          const failedBatchItem: WcProductImportItemResult = {
-            id: page,
-            name: `Lot #${page}`,
-            status: 'FAILED',
-            error: batchErr?.message || 'Erreur réseau ou délai dépassé'
-          };
-          accumulatedLogs = [...accumulatedLogs, failedBatchItem];
-          setImportLogs([...accumulatedLogs]);
-          setLiveFailedCount(currentFailed);
-          setImportedProducts(accumulatedLogs.length);
         }
       }
 
-      // Import loop complete! Open summary notification modal
+      // ==========================================
+      // ÉTAPE 2 : IMPORTATION DES BLOGS / ARTICLES
+      // ==========================================
+      if (includeArticles) {
+        setCurrentStepText('Étape 2 : Importation des articles de blog...');
+        try {
+          const artRes = await importWordPressArticles(url, consumerKey, consumerSecret);
+          if (artRes.success) {
+            setArticlesImportedCount(artRes.count || 0);
+            if (artRes.results) {
+              setArticlesResults(artRes.results);
+            }
+          }
+        } catch (artErr) {
+          console.error('Erreur import articles:', artErr);
+        }
+      }
+
+      // ==========================================
+      // ÉTAPE 3 : IMPORTATION DES PAGES (100% GARANTI)
+      // ==========================================
+      if (includePages) {
+        setCurrentStepText('Étape 3 : Importation complète des pages...');
+        try {
+          const pgsRes = await importWordPressPages(url, consumerKey, consumerSecret);
+          if (pgsRes.success) {
+            setPagesImportedCount(pgsRes.count || 0);
+            if (pgsRes.results) {
+              setPagesResults(pgsRes.results);
+            }
+          }
+        } catch (pgsErr) {
+          console.error('Erreur import pages:', pgsErr);
+        }
+      }
+
+      // ==========================================
+      // ÉTAPE 4 : IMPORTATION DES MÉDIAS
+      // ==========================================
+      if (includeMedia) {
+        setCurrentStepText('Étape 4 : Importation des médias WordPress...');
+        try {
+          const medRes = await importWordPressMedia(url, consumerKey, consumerSecret);
+          if (medRes.success) {
+            setMediaImportedCount(medRes.count || 0);
+            if (medRes.results) {
+              setMediaResults(medRes.results);
+            }
+          }
+        } catch (medErr) {
+          console.error('Erreur import médias:', medErr);
+        }
+      }
+
+      // ==========================================
+      // ÉTAPE 5 : DONNÉES COMPLÉMENTAIRES (LIVRAISON & COMMANDES)
+      // ==========================================
+      if (includeShipping) {
+        setCurrentStepText('Étape 5 : Importation des zones de livraison...');
+        try {
+          const shipRes = await importWooCommerceShipping(url, consumerKey, consumerSecret);
+          if (shipRes.success) {
+            setShippingSummary({ zones: shipRes.zonesCount || 0, methods: shipRes.methodsCount || 0 });
+          }
+        } catch (shipErr) {
+          console.error('Erreur import livraison:', shipErr);
+        }
+      }
+
+      if (includeOrders) {
+        setCurrentStepText('Étape 5 : Importation des commandes historiques...');
+        try {
+          const ordRes = await importWooCommerceOrders(url, consumerKey, consumerSecret);
+          if (ordRes.success) {
+            setOrdersImportedCount(ordRes.count || 0);
+          }
+        } catch (ordErr) {
+          console.error('Erreur import commandes:', ordErr);
+        }
+      }
+
+      // Importation terminée ! Ouverture du récapitulatif complet
+      setCurrentStepText('');
       setSummaryStats({
         success: currentSuccess,
         alreadyExists: currentAlreadyExists,
@@ -421,6 +468,11 @@ export default function WooCommerceImportModal() {
       });
       setSummaryTabFilter(currentFailed > 0 ? 'FAILED' : 'ALL');
       setShowSummaryModal(true);
+
+      if (importMode === 'INDIVIDUAL') {
+        setSelectedProductIds([]);
+        await handleSearchProducts(productPage);
+      }
 
     } catch (error: any) {
       setResultMessage({ type: 'error', text: t('import_error') + ': ' + error.message });
@@ -439,7 +491,7 @@ export default function WooCommerceImportModal() {
   const filteredSummaryLogs = useMemo(() => {
     return importLogs.filter(item => {
       const matchesTab = summaryTabFilter === 'ALL' || item.status === summaryTabFilter;
-      const matchesSearch = !summarySearch.trim() || 
+      const matchesSearch = !summarySearch.trim() ||
         item.name.toLowerCase().includes(summarySearch.toLowerCase()) ||
         (item.error && item.error.toLowerCase().includes(summarySearch.toLowerCase()));
       return matchesTab && matchesSearch;
@@ -455,6 +507,72 @@ export default function WooCommerceImportModal() {
     setTimeout(() => setCopiedErrors(false), 2500);
   };
 
+  // Copy full comprehensive report to clipboard
+  const handleCopyFullReport = () => {
+    const dateStr = new Date().toLocaleString('fr-FR');
+    const lines: string[] = [];
+    lines.push('====================================================');
+    lines.push('RAPPORT COMPLET D\'IMPORTATION WOOCOMMERCE & WORDPRESS');
+    lines.push(`Date : ${dateStr}`);
+    lines.push(`Boutique source : ${url}`);
+    lines.push('====================================================\n');
+
+    lines.push('📊 SYNTHÈSE GLOBALE :');
+    lines.push(`• Produits : ${summaryStats.total} traités (${summaryStats.success} importés avec succès, ${summaryStats.alreadyExists} déjà existants, ${summaryStats.failed} échecs)`);
+    if (pagesResults.length > 0 || pagesImportedCount !== null) {
+      lines.push(`• Pages institutionnelles : ${pagesResults.length || pagesImportedCount} page(s) (100% traitées)`);
+    }
+    if (articlesResults.length > 0 || articlesImportedCount !== null) {
+      lines.push(`• Articles de blog : ${articlesResults.length || articlesImportedCount} article(s)`);
+    }
+    if (mediaResults.length > 0 || mediaImportedCount !== null) {
+      lines.push(`• Médias : ${mediaResults.length || mediaImportedCount} fichier(s)`);
+    }
+    if (categoriesSummary.length > 0) {
+      lines.push(`• Catégories synchronisées : ${categoriesSummary.length} catégorie(s)`);
+    }
+    if (shippingSummary) {
+      lines.push(`• Livraison : ${shippingSummary.zones} zones (${shippingSummary.methods} méthodes de livraison)`);
+    }
+    if (ordersImportedCount !== null) {
+      lines.push(`• Commandes historiques : ${ordersImportedCount} commande(s)`);
+    }
+
+    if (pagesResults.length > 0) {
+      lines.push('\n📄 DÉTAIL DES PAGES :');
+      pagesResults.forEach((p, idx) => {
+        lines.push(`${idx + 1}. ${p.title} (/pages/${p.slug}) - ${p.status === 'SUCCESS' ? '✓ Importé' : p.status === 'ALREADY_EXISTS' ? '⚠️ Déjà existant' : '✕ Échec'}${p.error ? ` (${p.error})` : ''}`);
+      });
+    }
+
+    if (articlesResults.length > 0) {
+      lines.push('\n📝 DÉTAIL DES ARTICLES DE BLOG :');
+      articlesResults.forEach((a, idx) => {
+        lines.push(`${idx + 1}. ${a.title} (/blog/${a.slug}) - ${a.status === 'SUCCESS' ? '✓ Importé' : a.status === 'ALREADY_EXISTS' ? '⚠️ Déjà existant' : '✕ Échec'}${a.error ? ` (${a.error})` : ''}`);
+      });
+    }
+
+    if (categoriesSummary.length > 0) {
+      lines.push('\n🗂️ DÉTAIL DES CATÉGORIES :');
+      categoriesSummary.forEach((c, idx) => {
+        lines.push(`${idx + 1}. ${c.name} (${c.slug})`);
+      });
+    }
+
+    const failedProds = importLogs.filter(p => p.status === 'FAILED');
+    if (failedProds.length > 0) {
+      lines.push('\n⚠️ PRODUITS EN ÉCHEC :');
+      failedProds.forEach(p => {
+        lines.push(`• [ID ${p.id}] ${p.name} : ${p.error || 'Erreur inconnue'}`);
+      });
+    }
+
+    const reportText = lines.join('\n');
+    navigator.clipboard.writeText(reportText);
+    setCopiedFullReport(true);
+    setTimeout(() => setCopiedFullReport(false), 2500);
+  };
+
   const handleCloseSummary = () => {
     setShowSummaryModal(false);
     setIsOpen(false);
@@ -463,7 +581,7 @@ export default function WooCommerceImportModal() {
 
   return (
     <>
-      <button 
+      <button
         onClick={() => { resetModal(); setIsOpen(true); }}
         className="bg-blue-600 hover:bg-blue-700 text-white font-semibold px-4 py-2 rounded-md transition flex items-center space-x-2 shadow-sm"
       >
@@ -475,14 +593,14 @@ export default function WooCommerceImportModal() {
       {isOpen && !showSummaryModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
           <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full p-6 relative max-h-[92vh] flex flex-col">
-            
+
             {/* Header */}
             <div className="flex items-center justify-between pb-3 border-b border-gray-100 mb-4">
               <div>
                 <h2 className="text-xl font-bold text-gray-900">{t('import_woo_title')}</h2>
                 <p className="text-xs text-gray-500 mt-0.5">Importez des catégories entières, tous vos articles ou des produits au choix.</p>
               </div>
-              <button 
+              <button
                 onClick={() => !loading && setIsOpen(false)}
                 className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100 transition"
                 disabled={loading}
@@ -492,7 +610,7 @@ export default function WooCommerceImportModal() {
             </div>
 
             <form onSubmit={handleStartImport} className="flex-1 overflow-y-auto pr-1 space-y-4">
-              
+
               {/* Credentials Section */}
               <div className="bg-gray-50 p-4 rounded-xl border border-gray-200/80 space-y-3">
                 <div className="flex items-center justify-between">
@@ -506,8 +624,8 @@ export default function WooCommerceImportModal() {
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                   <div className="md:col-span-3">
-                    <input 
-                      type="url" 
+                    <input
+                      type="url"
                       required
                       placeholder="https://votreboutique.com"
                       value={url}
@@ -517,8 +635,8 @@ export default function WooCommerceImportModal() {
                     />
                   </div>
                   <div className="md:col-span-1">
-                    <input 
-                      type="text" 
+                    <input
+                      type="text"
                       required
                       placeholder="Client Key (ck_...)"
                       value={consumerKey}
@@ -528,8 +646,8 @@ export default function WooCommerceImportModal() {
                     />
                   </div>
                   <div className="md:col-span-2 flex gap-2">
-                    <input 
-                      type="password" 
+                    <input
+                      type="password"
                       required
                       placeholder="Client Secret (cs_...)"
                       value={consumerSecret}
@@ -595,85 +713,103 @@ export default function WooCommerceImportModal() {
                 </div>
               )}
 
-              {/* Additional Data Options (Shipping, Orders, Pages, Articles) */}
+              {/* Additional Data Options (Blogs, Pages, Media, Shipping, Orders) */}
               {credentialsVerified && !loading && importMode !== 'SEO_SYNC' && (
                 <div className="bg-stone-50 border border-stone-200 rounded-xl p-4 space-y-3">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-bold uppercase tracking-wider text-stone-800">
-                      Dados Adicionais a Importar
+                      Données complémentaires à importer
                     </span>
-                    <span className="text-[10px] text-stone-500">Recuperação integral do site WordPress</span>
+                    <span className="text-[10px] text-stone-500">Ordre d'import : Produits ➔ Blogs ➔ Pages ➔ Médias</span>
                   </div>
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                    {/* 1. Shipping Zones & Methods */}
-                    <label className={`flex items-start gap-2.5 p-3 rounded-lg border cursor-pointer transition select-none ${includeShipping ? 'bg-red-50/50 border-red-300 ring-1 ring-red-400/20' : 'bg-white border-stone-200 hover:bg-stone-50'}`}>
-                      <input 
-                        type="checkbox"
-                        checked={includeShipping}
-                        onChange={(e) => setIncludeShipping(e.target.checked)}
-                        className="rounded text-red-600 focus:ring-red-500 h-4 w-4 mt-0.5"
-                      />
-                      <div className="text-xs">
-                        <span className="font-bold text-stone-900 block flex items-center gap-1.5">
-                          🚚 Zonas & Opções de Envio
-                        </span>
-                        <span className="text-[11px] text-stone-500 block mt-0.5">
-                          Zonas atendidas, custos por palete e métodos de entrega
-                        </span>
-                      </div>
-                    </label>
-
-                    {/* 2. Orders */}
-                    <label className={`flex items-start gap-2.5 p-3 rounded-lg border cursor-pointer transition select-none ${includeOrders ? 'bg-red-50/50 border-red-300 ring-1 ring-red-400/20' : 'bg-white border-stone-200 hover:bg-stone-50'}`}>
-                      <input 
-                        type="checkbox"
-                        checked={includeOrders}
-                        onChange={(e) => setIncludeOrders(e.target.checked)}
-                        className="rounded text-red-600 focus:ring-red-500 h-4 w-4 mt-0.5"
-                      />
-                      <div className="text-xs">
-                        <span className="font-bold text-stone-900 block flex items-center gap-1.5">
-                          📦 Encomendas & Histórico
-                        </span>
-                        <span className="text-[11px] text-stone-500 block mt-0.5">
-                          Recuperar encomendas anteriores, clientes e moradas
-                        </span>
-                      </div>
-                    </label>
-
-                    {/* 3. Pages */}
-                    <label className={`flex items-start gap-2.5 p-3 rounded-lg border cursor-pointer transition select-none ${includePages ? 'bg-red-50/50 border-red-300 ring-1 ring-red-400/20' : 'bg-white border-stone-200 hover:bg-stone-50'}`}>
-                      <input 
-                        type="checkbox"
-                        checked={includePages}
-                        onChange={(e) => setIncludePages(e.target.checked)}
-                        className="rounded text-red-600 focus:ring-red-500 h-4 w-4 mt-0.5"
-                      />
-                      <div className="text-xs">
-                        <span className="font-bold text-stone-900 block flex items-center gap-1.5">
-                          📄 Páginas Institucionais
-                        </span>
-                        <span className="text-[11px] text-stone-500 block mt-0.5">
-                          Políticas de devolução, termos e condições, contactos
-                        </span>
-                      </div>
-                    </label>
-
-                    {/* 4. Blog Articles */}
-                    <label className={`flex items-start gap-2.5 p-3 rounded-lg border cursor-pointer transition select-none ${includeArticles ? 'bg-red-50/50 border-red-300 ring-1 ring-red-400/20' : 'bg-white border-stone-200 hover:bg-stone-50'}`}>
-                      <input 
+                    {/* 1. Blog Articles */}
+                    <label className={`flex items-start gap-2.5 p-3 rounded-lg border cursor-pointer transition select-none ${includeArticles ? 'bg-blue-50/50 border-blue-300 ring-1 ring-blue-400/20' : 'bg-white border-stone-200 hover:bg-stone-50'}`}>
+                      <input
                         type="checkbox"
                         checked={includeArticles}
                         onChange={(e) => setIncludeArticles(e.target.checked)}
-                        className="rounded text-red-600 focus:ring-red-500 h-4 w-4 mt-0.5"
+                        className="rounded text-blue-600 focus:ring-blue-500 h-4 w-4 mt-0.5"
                       />
                       <div className="text-xs">
                         <span className="font-bold text-stone-900 block flex items-center gap-1.5">
-                          📝 Artigos & Dicas de Aquecimento
+                          📝 Articles de Blog
                         </span>
                         <span className="text-[11px] text-stone-500 block mt-0.5">
-                          Guias de biomassa, conselhos de manutenção e artigos
+                          Articles WordPress, résumés et images associées
+                        </span>
+                      </div>
+                    </label>
+
+                    {/* 2. Pages */}
+                    <label className={`flex items-start gap-2.5 p-3 rounded-lg border cursor-pointer transition select-none ${includePages ? 'bg-blue-50/50 border-blue-300 ring-1 ring-blue-400/20' : 'bg-white border-stone-200 hover:bg-stone-50'}`}>
+                      <input
+                        type="checkbox"
+                        checked={includePages}
+                        onChange={(e) => setIncludePages(e.target.checked)}
+                        className="rounded text-blue-600 focus:ring-blue-500 h-4 w-4 mt-0.5"
+                      />
+                      <div className="text-xs">
+                        <span className="font-bold text-stone-900 block flex items-center gap-1.5">
+                          📄 Pages Institutionnelles (100%)
+                        </span>
+                        <span className="text-[11px] text-stone-500 block mt-0.5">
+                          À propos, mentions légales, CGV, contact, SEO inclus
+                        </span>
+                      </div>
+                    </label>
+
+                    {/* 3. Media */}
+                    <label className={`flex items-start gap-2.5 p-3 rounded-lg border cursor-pointer transition select-none ${includeMedia ? 'bg-blue-50/50 border-blue-300 ring-1 ring-blue-400/20' : 'bg-white border-stone-200 hover:bg-stone-50'}`}>
+                      <input
+                        type="checkbox"
+                        checked={includeMedia}
+                        onChange={(e) => setIncludeMedia(e.target.checked)}
+                        className="rounded text-blue-600 focus:ring-blue-500 h-4 w-4 mt-0.5"
+                      />
+                      <div className="text-xs">
+                        <span className="font-bold text-stone-900 block flex items-center gap-1.5">
+                          🖼️ Médias WordPress
+                        </span>
+                        <span className="text-[11px] text-stone-500 block mt-0.5">
+                          Images et fichiers hébergés sur Cloudinary
+                        </span>
+                      </div>
+                    </label>
+
+                    {/* 4. Shipping */}
+                    <label className={`flex items-start gap-2.5 p-3 rounded-lg border cursor-pointer transition select-none ${includeShipping ? 'bg-blue-50/50 border-blue-300 ring-1 ring-blue-400/20' : 'bg-white border-stone-200 hover:bg-stone-50'}`}>
+                      <input
+                        type="checkbox"
+                        checked={includeShipping}
+                        onChange={(e) => setIncludeShipping(e.target.checked)}
+                        className="rounded text-blue-600 focus:ring-blue-500 h-4 w-4 mt-0.5"
+                      />
+                      <div className="text-xs">
+                        <span className="font-bold text-stone-900 block flex items-center gap-1.5">
+                          🚚 Zones & Modes de Livraison
+                        </span>
+                        <span className="text-[11px] text-stone-500 block mt-0.5">
+                          Zones géographiques desservies et méthodes configurées
+                        </span>
+                      </div>
+                    </label>
+
+                    {/* 5. Orders */}
+                    <label className={`flex items-start gap-2.5 p-3 rounded-lg border cursor-pointer transition select-none ${includeOrders ? 'bg-blue-50/50 border-blue-300 ring-1 ring-blue-400/20' : 'bg-white border-stone-200 hover:bg-stone-50'}`}>
+                      <input
+                        type="checkbox"
+                        checked={includeOrders}
+                        onChange={(e) => setIncludeOrders(e.target.checked)}
+                        className="rounded text-blue-600 focus:ring-blue-500 h-4 w-4 mt-0.5"
+                      />
+                      <div className="text-xs">
+                        <span className="font-bold text-stone-900 block flex items-center gap-1.5">
+                          📦 Commandes & Historique
+                        </span>
+                        <span className="text-[11px] text-stone-500 block mt-0.5">
+                          Historique des commandes, clients et adresses
                         </span>
                       </div>
                     </label>
@@ -695,7 +831,7 @@ export default function WooCommerceImportModal() {
                       availableCategories.map(cat => (
                         <label key={cat.id} className="flex items-center justify-between px-3.5 py-2 hover:bg-gray-50 cursor-pointer text-xs">
                           <div className="flex items-center gap-2.5">
-                            <input 
+                            <input
                               type="checkbox"
                               checked={selectedCategoryIds.includes(cat.id)}
                               onChange={() => toggleCategory(cat.id)}
@@ -718,7 +854,7 @@ export default function WooCommerceImportModal() {
                 <div className="space-y-2">
                   <div className="flex items-center justify-between gap-2">
                     <div className="relative flex-1">
-                      <input 
+                      <input
                         type="text"
                         placeholder="Rechercher un produit distant..."
                         value={productSearch}
@@ -756,7 +892,7 @@ export default function WooCommerceImportModal() {
                       availableProducts.map(prod => (
                         <div key={prod.id} className="flex items-center justify-between p-2.5 hover:bg-gray-50 gap-3">
                           <div className="flex items-center gap-3 min-w-0">
-                            <input 
+                            <input
                               type="checkbox"
                               checked={selectedProductIds.includes(prod.id)}
                               onChange={() => toggleProduct(prod.id)}
@@ -764,12 +900,12 @@ export default function WooCommerceImportModal() {
                               className="rounded text-blue-600 focus:ring-blue-500 h-4 w-4 disabled:opacity-40"
                             />
                             {prod.image ? (
-                              <Image 
-                                src={prod.image} 
-                                alt="" 
-                                width={36} 
-                                height={36} 
-                                className="w-9 h-9 object-cover rounded-md border shrink-0 bg-gray-50" 
+                              <Image
+                                src={prod.image}
+                                alt=""
+                                width={36}
+                                height={36}
+                                className="w-9 h-9 object-cover rounded-md border shrink-0 bg-gray-50"
                               />
                             ) : (
                               <div className="w-9 h-9 bg-gray-100 rounded-md shrink-0 flex items-center justify-center text-[10px] text-gray-400">
@@ -836,7 +972,7 @@ export default function WooCommerceImportModal() {
               {/* LIVE IMPORT PROGRESS STREAM */}
               {loading && (
                 <div className="bg-gray-50 p-4 rounded-xl border border-gray-200 space-y-3">
-                  
+
                   {/* Progress Header */}
                   <div className="space-y-1.5">
                     <div className="flex justify-between items-center text-xs">
@@ -845,7 +981,7 @@ export default function WooCommerceImportModal() {
                           <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
                           <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-600"></span>
                         </span>
-                        {importingCategories ? 'Synchronisation des catégories...' : 'Importation des produits en cours...'}
+                        {currentStepText || (importingCategories ? 'Synchronisation des catégories...' : 'Importation des produits en cours...')}
                       </span>
                       <span className="font-mono text-xs font-bold text-blue-600">
                         {importedProducts} / {totalProducts} {totalProducts > 0 ? `(${Math.min(100, Math.round((importedProducts / totalProducts) * 100))}%)` : ''}
@@ -853,8 +989,8 @@ export default function WooCommerceImportModal() {
                     </div>
 
                     <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
-                      <div 
-                        className="bg-blue-600 h-2 rounded-full transition-all duration-300" 
+                      <div
+                        className="bg-blue-600 h-2 rounded-full transition-all duration-300"
                         style={{ width: `${totalProducts > 0 ? Math.min(100, Math.round((importedProducts / totalProducts) * 100)) : 100}%` }}
                       />
                     </div>
@@ -984,8 +1120,8 @@ export default function WooCommerceImportModal() {
                 >
                   Annuler
                 </button>
-                <button 
-                  type="submit" 
+                <button
+                  type="submit"
                   disabled={loading || !credentialsVerified}
                   className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 px-4 rounded-xl text-xs transition disabled:opacity-50 flex justify-center items-center gap-2 shadow-sm"
                 >
@@ -996,9 +1132,9 @@ export default function WooCommerceImportModal() {
                     </>
                   ) : (
                     <span>
-                      {importMode === 'INDIVIDUAL' 
+                      {importMode === 'INDIVIDUAL'
                         ? `Importer les ${selectedProductIds.length} produit(s) sélectionné(s)`
-                        : importMode === 'CATEGORIES' 
+                        : importMode === 'CATEGORIES'
                           ? `Importer les catégories sélectionnées`
                           : importMode === 'SEO_SYNC'
                             ? `Sincronizar Meta Tags SEO RankMath`
@@ -1016,8 +1152,8 @@ export default function WooCommerceImportModal() {
       {/* FINAL NOTIFICATION & SUMMARY MODAL */}
       {showSummaryModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-xs">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full p-6 relative max-h-[92vh] flex flex-col animate-in fade-in zoom-in-95 duration-200">
-            
+          <div className="bg-white rounded-2xl shadow-2xl max-w-3xl w-full p-6 relative max-h-[92vh] flex flex-col animate-in fade-in zoom-in-95 duration-200">
+
             {/* Header */}
             <div className="flex items-center justify-between pb-4 border-b border-gray-100">
               <div className="flex items-center gap-3">
@@ -1025,11 +1161,13 @@ export default function WooCommerceImportModal() {
                   {summaryStats.failed > 0 ? '⚠️' : '🎉'}
                 </div>
                 <div>
-                  <h2 className="text-lg font-bold text-gray-900">Importation WooCommerce terminée</h2>
-                  <p className="text-xs text-gray-500">Compte rendu complet du traitement de vos produits.</p>
+                  <h2 className="text-lg font-bold text-gray-900">Rapport complet d'importation WooCommerce</h2>
+                  <p className="text-xs text-gray-500">
+                    Boutique source : <span className="font-semibold text-gray-700">{url || 'WooCommerce'}</span> &bull; Récapitulatif exhaustif
+                  </p>
                 </div>
               </div>
-              <button 
+              <button
                 onClick={handleCloseSummary}
                 className="text-gray-400 hover:text-gray-600 p-1.5 rounded-lg hover:bg-gray-100 transition"
               >
@@ -1040,209 +1178,448 @@ export default function WooCommerceImportModal() {
             {/* Content */}
             <div className="flex-1 overflow-y-auto py-4 space-y-4 pr-1">
 
-              {/* 3 Metric Cards */}
-              <div className="grid grid-cols-3 gap-3">
-                {/* Réussite */}
-                <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3.5 text-center">
-                  <span className="text-2xl font-black text-emerald-600 block">{summaryStats.success}</span>
-                  <span className="text-xs font-bold text-emerald-800 mt-0.5 block">Réussite{summaryStats.success > 1 ? 's' : ''}</span>
-                  <span className="text-[10px] text-emerald-600">Produits ajoutés</span>
+              {/* 6 Global Metric KPI Cards */}
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2 text-center">
+                {/* 1. Produits */}
+                <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-2.5">
+                  <span className="text-xl font-black text-emerald-600 block">{summaryStats.success}</span>
+                  <span className="text-[11px] font-bold text-emerald-800 block">Produits</span>
+                  <span className="text-[9px] text-emerald-600 block truncate">+{summaryStats.alreadyExists} exist.</span>
                 </div>
 
-                {/* Already exist */}
-                <div className="bg-amber-50 border border-amber-200 rounded-xl p-3.5 text-center">
-                  <span className="text-2xl font-black text-amber-600 block">{summaryStats.alreadyExists}</span>
-                  <span className="text-xs font-bold text-amber-800 mt-0.5 block">Already exist</span>
-                  <span className="text-[10px] text-amber-600">Déjà présents sur le site</span>
+                {/* 2. Pages */}
+                <div className="bg-purple-50 border border-purple-200 rounded-xl p-2.5">
+                  <span className="text-xl font-black text-purple-600 block">{pagesResults.length || pagesImportedCount || 0}</span>
+                  <span className="text-[11px] font-bold text-purple-800 block">Pages</span>
+                  <span className="text-[9px] text-purple-600 block truncate">100% traitées</span>
                 </div>
 
-                {/* Échecs */}
-                <div className={`rounded-xl p-3.5 text-center border ${summaryStats.failed > 0 ? 'bg-rose-50 border-rose-300' : 'bg-gray-50 border-gray-200'}`}>
-                  <span className={`text-2xl font-black block ${summaryStats.failed > 0 ? 'text-rose-600' : 'text-gray-400'}`}>
-                    {summaryStats.failed}
+                {/* 3. Blogs */}
+                <div className="bg-amber-50 border border-amber-200 rounded-xl p-2.5">
+                  <span className="text-xl font-black text-amber-600 block">{articlesResults.length || articlesImportedCount || 0}</span>
+                  <span className="text-[11px] font-bold text-amber-800 block">Articles Blog</span>
+                  <span className="text-[9px] text-amber-600 block truncate">Importés</span>
+                </div>
+
+                {/* 4. Médias */}
+                <div className="bg-sky-50 border border-sky-200 rounded-xl p-2.5">
+                  <span className="text-xl font-black text-sky-600 block">{mediaResults.length || mediaImportedCount || 0}</span>
+                  <span className="text-[11px] font-bold text-sky-800 block">Médias</span>
+                  <span className="text-[9px] text-sky-600 block truncate">Cloudinary</span>
+                </div>
+
+                {/* 5. Catégories */}
+                <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-2.5">
+                  <span className="text-xl font-black text-indigo-600 block">{categoriesSummary.length || availableCategories.length || 0}</span>
+                  <span className="text-[11px] font-bold text-indigo-800 block">Catégories</span>
+                  <span className="text-[9px] text-indigo-600 block truncate">Synchronisées</span>
+                </div>
+
+                {/* 6. Livraison & Cmd */}
+                <div className="bg-stone-50 border border-stone-200 rounded-xl p-2.5">
+                  <span className="text-xl font-black text-stone-700 block">
+                    {shippingSummary ? shippingSummary.zones : 0}
                   </span>
-                  <span className={`text-xs font-bold mt-0.5 block ${summaryStats.failed > 0 ? 'text-rose-800' : 'text-gray-600'}`}>
-                    Échec{summaryStats.failed > 1 ? 's' : ''}
-                  </span>
-                  <span className="text-[10px] text-gray-500">Erreurs d'import</span>
+                  <span className="text-[11px] font-bold text-stone-800 block">Livraison</span>
+                  <span className="text-[9px] text-stone-500 block truncate">{ordersImportedCount || 0} cmd.</span>
                 </div>
               </div>
 
-              {/* Alert Callout if failures */}
+              {/* Alert Callout if product failures */}
               {summaryStats.failed > 0 && (
                 <div className="bg-rose-50 border border-rose-200 rounded-xl p-3 text-xs text-rose-800 flex items-start gap-2.5">
                   <span className="text-base">⚠️</span>
                   <div className="flex-1">
                     <p className="font-bold">Des erreurs ont été rencontrées sur {summaryStats.failed} produit(s).</p>
-                    <p className="text-[11px] text-rose-700 mt-0.5">Consultez l'onglet « Échecs » ci-dessous pour voir la liste détaillée et le motif exact de chaque échec.</p>
+                    <p className="text-[11px] text-rose-700 mt-0.5">Consultez l'onglet « Produits » ci-dessous pour voir la liste détaillée et le motif exact de chaque échec.</p>
                   </div>
                 </div>
               )}
 
-              {/* Extra Imported Data Badges */}
-              {(shippingSummary || ordersImportedCount !== null || pagesImportedCount !== null || articlesImportedCount !== null) && (
-                <div className="bg-stone-50 border border-stone-200 rounded-xl p-3.5 space-y-2 text-xs">
-                  <span className="font-bold text-stone-900 block">Outros dados recuperados com sucesso:</span>
-                  <div className="flex flex-wrap gap-2 text-[11px]">
-                    {shippingSummary && (
-                      <span className="px-2.5 py-1 bg-emerald-50 text-emerald-800 font-semibold rounded-lg border border-emerald-200 flex items-center gap-1.5 shadow-xs">
-                        🚚 {shippingSummary.zones} Zonas de Envio ({shippingSummary.methods} métodos de entrega)
-                      </span>
-                    )}
-                    {ordersImportedCount !== null && (
-                      <span className="px-2.5 py-1 bg-blue-50 text-blue-800 font-semibold rounded-lg border border-blue-200 flex items-center gap-1.5 shadow-xs">
-                        📦 {ordersImportedCount} Encomendas anteriores
-                      </span>
-                    )}
-                    {pagesImportedCount !== null && (
-                      <span className="px-2.5 py-1 bg-purple-50 text-purple-800 font-semibold rounded-lg border border-purple-200 flex items-center gap-1.5 shadow-xs">
-                        📄 {pagesImportedCount} Páginas institucionais
-                      </span>
-                    )}
-                    {articlesImportedCount !== null && (
-                      <span className="px-2.5 py-1 bg-amber-50 text-amber-800 font-semibold rounded-lg border border-amber-200 flex items-center gap-1.5 shadow-xs">
-                        📝 {articlesImportedCount} Artigos de blog
-                      </span>
-                    )}
-                  </div>
-                </div>
-              )}
+              {/* Navigation Tabs for Entities */}
+              <div className="flex border-b border-gray-200 gap-1 overflow-x-auto text-xs pb-1">
+                <button
+                  type="button"
+                  onClick={() => setActiveSummaryTab('PRODUCTS')}
+                  className={`px-3 py-1.5 font-bold rounded-lg transition whitespace-nowrap flex items-center gap-1.5 ${activeSummaryTab === 'PRODUCTS' ? 'bg-blue-600 text-white shadow-xs' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
+                >
+                  <span>📦 Produits</span>
+                  <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-white/20">{summaryStats.total}</span>
+                </button>
 
-              {/* Tabs & Search Bar */}
-              <div className="space-y-2 pt-1">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b pb-2">
-                  
-                  {/* Filter Tabs */}
-                  <div className="flex gap-1.5 flex-wrap">
-                    <button
-                      type="button"
-                      onClick={() => setSummaryTabFilter('ALL')}
-                      className={`px-3 py-1 rounded-lg text-xs font-semibold transition ${summaryTabFilter === 'ALL' ? 'bg-gray-900 text-white shadow-xs' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
-                    >
-                      Tous ({summaryStats.total})
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSummaryTabFilter('FAILED')}
-                      className={`px-3 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1.5 ${summaryTabFilter === 'FAILED' ? 'bg-rose-600 text-white shadow-xs' : 'bg-rose-50 text-rose-700 hover:bg-rose-100 border border-rose-200'}`}
-                    >
-                      <span>Échecs</span>
-                      <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${summaryTabFilter === 'FAILED' ? 'bg-rose-700 text-white' : 'bg-rose-200 text-rose-800'}`}>
-                        {summaryStats.failed}
-                      </span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSummaryTabFilter('ALREADY_EXISTS')}
-                      className={`px-3 py-1 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${summaryTabFilter === 'ALREADY_EXISTS' ? 'bg-amber-600 text-white shadow-xs' : 'bg-amber-50 text-amber-800 hover:bg-amber-100 border border-amber-200'}`}
-                    >
-                      <span>Already exist</span>
-                      <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${summaryTabFilter === 'ALREADY_EXISTS' ? 'bg-amber-700 text-white' : 'bg-amber-200 text-amber-800'}`}>
-                        {summaryStats.alreadyExists}
-                      </span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSummaryTabFilter('SUCCESS')}
-                      className={`px-3 py-1 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${summaryTabFilter === 'SUCCESS' ? 'bg-emerald-600 text-white shadow-xs' : 'bg-emerald-50 text-emerald-800 hover:bg-emerald-100 border border-emerald-200'}`}
-                    >
-                      <span>Réussis</span>
-                      <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${summaryTabFilter === 'SUCCESS' ? 'bg-emerald-700 text-white' : 'bg-emerald-200 text-emerald-800'}`}>
-                        {summaryStats.success}
-                      </span>
-                    </button>
-                  </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveSummaryTab('PAGES')}
+                  className={`px-3 py-1.5 font-bold rounded-lg transition whitespace-nowrap flex items-center gap-1.5 ${activeSummaryTab === 'PAGES' ? 'bg-purple-600 text-white shadow-xs' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
+                >
+                  <span>📄 Pages</span>
+                  <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-white/20">{pagesResults.length || pagesImportedCount || 0}</span>
+                </button>
 
-                  {/* Search within summary */}
-                  <div className="relative">
-                    <input 
-                      type="text" 
-                      placeholder="Filtrer la liste..."
-                      value={summarySearch}
-                      onChange={(e) => setSummarySearch(e.target.value)}
-                      className="pl-7 pr-3 py-1 text-xs border border-gray-300 rounded-lg w-full sm:w-44 focus:ring-1 focus:ring-blue-500"
-                    />
-                    <svg className="w-3.5 h-3.5 text-gray-400 absolute left-2 top-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
-                  </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveSummaryTab('ARTICLES')}
+                  className={`px-3 py-1.5 font-bold rounded-lg transition whitespace-nowrap flex items-center gap-1.5 ${activeSummaryTab === 'ARTICLES' ? 'bg-amber-600 text-white shadow-xs' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
+                >
+                  <span>📝 Blog</span>
+                  <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-white/20">{articlesResults.length || articlesImportedCount || 0}</span>
+                </button>
 
-                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveSummaryTab('MEDIA')}
+                  className={`px-3 py-1.5 font-bold rounded-lg transition whitespace-nowrap flex items-center gap-1.5 ${activeSummaryTab === 'MEDIA' ? 'bg-sky-600 text-white shadow-xs' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
+                >
+                  <span>🖼️ Médias</span>
+                  <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-white/20">{mediaResults.length || mediaImportedCount || 0}</span>
+                </button>
 
-                {/* Items List */}
-                <div className="max-h-64 overflow-y-auto border border-gray-200 rounded-xl divide-y divide-gray-100 bg-white">
-                  {filteredSummaryLogs.length === 0 ? (
-                    <div className="p-6 text-center text-gray-400 text-xs">
-                      Aucun produit ne correspond au filtre sélectionné.
+                <button
+                  type="button"
+                  onClick={() => setActiveSummaryTab('CATEGORIES')}
+                  className={`px-3 py-1.5 font-bold rounded-lg transition whitespace-nowrap flex items-center gap-1.5 ${activeSummaryTab === 'CATEGORIES' ? 'bg-indigo-600 text-white shadow-xs' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
+                >
+                  <span>🗂️ Catégories</span>
+                  <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-white/20">{categoriesSummary.length}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setActiveSummaryTab('SHIPPING')}
+                  className={`px-3 py-1.5 font-bold rounded-lg transition whitespace-nowrap flex items-center gap-1.5 ${activeSummaryTab === 'SHIPPING' ? 'bg-stone-700 text-white shadow-xs' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
+                >
+                  <span>🚚 Livraison & Cmd</span>
+                </button>
+              </div>
+
+              {/* TAB 1: PRODUCTS */}
+              {activeSummaryTab === 'PRODUCTS' && (
+                <div className="space-y-2 pt-1">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b pb-2">
+
+                    {/* Sub-Filter Tabs */}
+                    <div className="flex gap-1.5 flex-wrap">
+                      <button
+                        type="button"
+                        onClick={() => setSummaryTabFilter('ALL')}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition ${summaryTabFilter === 'ALL' ? 'bg-gray-900 text-white shadow-xs' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+                      >
+                        Tous ({summaryStats.total})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSummaryTabFilter('FAILED')}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1.5 ${summaryTabFilter === 'FAILED' ? 'bg-rose-600 text-white shadow-xs' : 'bg-rose-50 text-rose-700 hover:bg-rose-100 border border-rose-200'}`}
+                      >
+                        <span>Échecs</span>
+                        <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${summaryTabFilter === 'FAILED' ? 'bg-rose-700 text-white' : 'bg-rose-200 text-rose-800'}`}>
+                          {summaryStats.failed}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSummaryTabFilter('ALREADY_EXISTS')}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${summaryTabFilter === 'ALREADY_EXISTS' ? 'bg-amber-600 text-white shadow-xs' : 'bg-amber-50 text-amber-800 hover:bg-amber-100 border border-amber-200'}`}
+                      >
+                        <span>Already exist</span>
+                        <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${summaryTabFilter === 'ALREADY_EXISTS' ? 'bg-amber-700 text-white' : 'bg-amber-200 text-amber-800'}`}>
+                          {summaryStats.alreadyExists}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSummaryTabFilter('SUCCESS')}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${summaryTabFilter === 'SUCCESS' ? 'bg-emerald-600 text-white shadow-xs' : 'bg-emerald-50 text-emerald-800 hover:bg-emerald-100 border border-emerald-200'}`}
+                      >
+                        <span>Réussis</span>
+                        <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${summaryTabFilter === 'SUCCESS' ? 'bg-emerald-700 text-white' : 'bg-emerald-200 text-emerald-800'}`}>
+                          {summaryStats.success}
+                        </span>
+                      </button>
                     </div>
-                  ) : (
-                    filteredSummaryLogs.map((item, idx) => (
-                      <div key={idx} className="p-3 hover:bg-gray-50 flex items-start justify-between gap-3 transition">
-                        <div className="flex items-start gap-3 min-w-0">
-                          {item.image ? (
-                            <img src={item.image} alt="" className="w-10 h-10 rounded-lg object-cover border shrink-0 bg-gray-50" />
-                          ) : (
-                            <div className="w-10 h-10 rounded-lg bg-gray-100 flex items-center justify-center text-sm shrink-0">
-                              📦
-                            </div>
-                          )}
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              {item.status === 'ALREADY_EXISTS' && (
-                                <span className="font-extrabold text-[10px] uppercase tracking-wider bg-amber-100 text-amber-800 border border-amber-300 px-2 py-0.5 rounded-full shrink-0 flex items-center gap-1">
-                                  <span>⚠️</span>
-                                  <span>Already exist</span>
-                                </span>
-                              )}
-                              {item.status === 'SUCCESS' && (
-                                <span className="font-bold text-[10px] uppercase tracking-wider bg-emerald-100 text-emerald-800 border border-emerald-300 px-2 py-0.5 rounded-full shrink-0 flex items-center gap-1">
-                                  <span>✓</span>
-                                  <span>Importé</span>
-                                </span>
-                              )}
-                              {item.status === 'FAILED' && (
-                                <span className="font-bold text-[10px] uppercase tracking-wider bg-rose-100 text-rose-800 border border-rose-300 px-2 py-0.5 rounded-full shrink-0 flex items-center gap-1">
-                                  <span>✕</span>
-                                  <span>Échec</span>
-                                </span>
-                              )}
-                              <p className="text-xs font-bold text-gray-900 truncate">
-                                {item.status === 'ALREADY_EXISTS' ? `[Already exist] ${item.name}` : item.name}
-                              </p>
-                            </div>
-                            
-                            {item.status === 'FAILED' && item.error && (
-                              <div className="mt-1.5 p-2 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-[11px] font-mono leading-relaxed">
-                                <span className="font-bold">Motif de l'échec :</span> {item.error}
+
+                    {/* Search within products summary */}
+                    <div className="relative">
+                      <input
+                        type="text"
+                        placeholder="Filtrer les produits..."
+                        value={summarySearch}
+                        onChange={(e) => setSummarySearch(e.target.value)}
+                        className="pl-7 pr-3 py-1 text-xs border border-gray-300 rounded-lg w-full sm:w-44 focus:ring-1 focus:ring-blue-500"
+                      />
+                      <svg className="w-3.5 h-3.5 text-gray-400 absolute left-2 top-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+                    </div>
+
+                  </div>
+
+                  {/* Items List */}
+                  <div className="max-h-64 overflow-y-auto border border-gray-200 rounded-xl divide-y divide-gray-100 bg-white">
+                    {filteredSummaryLogs.length === 0 ? (
+                      <div className="p-6 text-center text-gray-400 text-xs">
+                        Aucun produit ne correspond au filtre sélectionné.
+                      </div>
+                    ) : (
+                      filteredSummaryLogs.map((item, idx) => (
+                        <div key={idx} className="p-3 hover:bg-gray-50 flex items-start justify-between gap-3 transition">
+                          <div className="flex items-start gap-3 min-w-0">
+                            {item.image ? (
+                              <img src={item.image} alt="" className="w-10 h-10 rounded-lg object-cover border shrink-0 bg-gray-50" />
+                            ) : (
+                              <div className="w-10 h-10 rounded-lg bg-gray-100 flex items-center justify-center text-sm shrink-0">
+                                📦
                               </div>
                             )}
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                {item.status === 'ALREADY_EXISTS' && (
+                                  <span className="font-extrabold text-[10px] uppercase tracking-wider bg-amber-100 text-amber-800 border border-amber-300 px-2 py-0.5 rounded-full shrink-0 flex items-center gap-1">
+                                    <span>⚠️</span>
+                                    <span>Already exist</span>
+                                  </span>
+                                )}
+                                {item.status === 'SUCCESS' && (
+                                  <span className="font-bold text-[10px] uppercase tracking-wider bg-emerald-100 text-emerald-800 border border-emerald-300 px-2 py-0.5 rounded-full shrink-0 flex items-center gap-1">
+                                    <span>✓</span>
+                                    <span>Importé</span>
+                                  </span>
+                                )}
+                                {item.status === 'FAILED' && (
+                                  <span className="font-bold text-[10px] uppercase tracking-wider bg-rose-100 text-rose-800 border border-rose-300 px-2 py-0.5 rounded-full shrink-0 flex items-center gap-1">
+                                    <span>✕</span>
+                                    <span>Échec</span>
+                                  </span>
+                                )}
+                                <p className="text-xs font-bold text-gray-900 truncate">
+                                  {item.status === 'ALREADY_EXISTS' ? `[Already exist] ${item.name}` : item.name}
+                                </p>
+                              </div>
 
-                            <p className="text-[10px] text-gray-500 mt-1">
-                              ID WooCommerce: <span className="font-mono">{item.id}</span>
-                              {item.price ? ` • Prix: ${item.price} €` : ''}
-                            </p>
+                              {item.status === 'FAILED' && item.error && (
+                                <div className="mt-1.5 p-2 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-[11px] font-mono leading-relaxed">
+                                  <span className="font-bold">Motif de l'échec :</span> {item.error}
+                                </div>
+                              )}
+
+                              <p className="text-[10px] text-gray-500 mt-1">
+                                ID WooCommerce: <span className="font-mono">{item.id}</span>
+                                {item.price ? ` • Prix: ${item.price} €` : ''}
+                              </p>
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    ))
-                  )}
+                      ))
+                    )}
+                  </div>
                 </div>
-              </div>
+              )}
+
+              {/* TAB 2: PAGES */}
+              {activeSummaryTab === 'PAGES' && (
+                <div className="space-y-2 pt-1">
+                  <div className="flex items-center justify-between text-xs pb-1 border-b">
+                    <span className="font-bold text-gray-800">
+                      Pages institutionnelles traitées ({pagesResults.length || pagesImportedCount || 0})
+                    </span>
+                    <span className="text-[11px] text-purple-700 bg-purple-50 px-2 py-0.5 rounded-full border border-purple-200">
+                      Taux d'importation : 100%
+                    </span>
+                  </div>
+
+                  <div className="max-h-64 overflow-y-auto border border-gray-200 rounded-xl divide-y divide-gray-100 bg-white">
+                    {pagesResults.length === 0 ? (
+                      <div className="p-6 text-center text-gray-400 text-xs">
+                        {pagesImportedCount ? `${pagesImportedCount} pages importées avec succès.` : 'Aucune page traitée lors de cette session.'}
+                      </div>
+                    ) : (
+                      pagesResults.map((page, idx) => (
+                        <div key={idx} className="p-3 hover:bg-gray-50 flex items-center justify-between gap-3 text-xs">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="font-bold text-gray-900 truncate">{page.title}</span>
+                              <span className="text-[10px] font-mono text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded">
+                                /pages/{page.slug}
+                              </span>
+                            </div>
+                            {page.error && (
+                              <p className="text-[10px] text-rose-600 mt-1">{page.error}</p>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <span className={`text-[10px] px-2 py-0.5 rounded-full font-semibold ${page.isPublished ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-100 text-gray-700'}`}>
+                              {page.isPublished ? 'Publiée' : 'Brouillon'}
+                            </span>
+                            <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${page.status === 'SUCCESS' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : page.status === 'ALREADY_EXISTS' ? 'bg-amber-50 text-amber-700 border border-amber-200' : 'bg-rose-50 text-rose-700 border border-rose-200'}`}>
+                              {page.status === 'SUCCESS' ? '✓ Importée' : page.status === 'ALREADY_EXISTS' ? '⚠️ Mise à jour' : '✕ Échec'}
+                            </span>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* TAB 3: ARTICLES BLOG */}
+              {activeSummaryTab === 'ARTICLES' && (
+                <div className="space-y-2 pt-1">
+                  <div className="flex items-center justify-between text-xs pb-1 border-b">
+                    <span className="font-bold text-gray-800">
+                      Articles de blog importés ({articlesResults.length || articlesImportedCount || 0})
+                    </span>
+                  </div>
+
+                  <div className="max-h-64 overflow-y-auto border border-gray-200 rounded-xl divide-y divide-gray-100 bg-white">
+                    {articlesResults.length === 0 ? (
+                      <div className="p-6 text-center text-gray-400 text-xs">
+                        {articlesImportedCount ? `${articlesImportedCount} articles importés avec succès.` : 'Aucun article traité lors de cette session.'}
+                      </div>
+                    ) : (
+                      articlesResults.map((art, idx) => (
+                        <div key={idx} className="p-3 hover:bg-gray-50 flex items-center justify-between gap-3 text-xs">
+                          <div className="flex items-center gap-3 min-w-0">
+                            {art.image ? (
+                              <img src={art.image} alt="" className="w-10 h-10 rounded-lg object-cover border shrink-0 bg-gray-50" />
+                            ) : (
+                              <div className="w-10 h-10 rounded-lg bg-gray-100 flex items-center justify-center text-sm shrink-0">
+                                📝
+                              </div>
+                            )}
+                            <div className="min-w-0">
+                              <span className="font-bold text-gray-900 block truncate">{art.title}</span>
+                              <span className="text-[10px] font-mono text-gray-500">/blog/{art.slug}</span>
+                            </div>
+                          </div>
+                          <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold shrink-0 ${art.status === 'SUCCESS' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-amber-50 text-amber-700 border border-amber-200'}`}>
+                            {art.status === 'SUCCESS' ? '✓ Importé' : '⚠️ Mis à jour'}
+                          </span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* TAB 4: MEDIA */}
+              {activeSummaryTab === 'MEDIA' && (
+                <div className="space-y-2 pt-1">
+                  <div className="flex items-center justify-between text-xs pb-1 border-b">
+                    <span className="font-bold text-gray-800">
+                      Médias importés ({mediaResults.length || mediaImportedCount || 0})
+                    </span>
+                    <span className="text-[10px] text-gray-500">Hébergés sur Cloudinary</span>
+                  </div>
+
+                  <div className="max-h-64 overflow-y-auto border border-gray-200 rounded-xl divide-y divide-gray-100 bg-white">
+                    {mediaResults.length === 0 ? (
+                      <div className="p-6 text-center text-gray-400 text-xs">
+                        {mediaImportedCount ? `${mediaImportedCount} médias importés avec succès.` : 'Aucun média importé lors de cette session.'}
+                      </div>
+                    ) : (
+                      mediaResults.map((med, idx) => (
+                        <div key={idx} className="p-2.5 hover:bg-gray-50 flex items-center justify-between gap-3 text-xs">
+                          <div className="flex items-center gap-3 min-w-0">
+                            {med.url ? (
+                              <img src={med.url} alt="" className="w-9 h-9 rounded object-cover border shrink-0 bg-gray-50" />
+                            ) : (
+                              <div className="w-9 h-9 rounded bg-gray-100 flex items-center justify-center text-xs shrink-0">
+                                🖼️
+                              </div>
+                            )}
+                            <div className="min-w-0">
+                              <p className="font-bold text-gray-900 truncate">{med.title}</p>
+                              <p className="text-[10px] text-gray-400 truncate font-mono">{med.url}</p>
+                            </div>
+                          </div>
+                          <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full shrink-0">
+                            ✓ Enregistré
+                          </span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* TAB 5: CATEGORIES */}
+              {activeSummaryTab === 'CATEGORIES' && (
+                <div className="space-y-2 pt-1">
+                  <div className="flex items-center justify-between text-xs pb-1 border-b">
+                    <span className="font-bold text-gray-800">
+                      Catégories du catalogue ({categoriesSummary.length || availableCategories.length || 0})
+                    </span>
+                  </div>
+
+                  <div className="max-h-64 overflow-y-auto border border-gray-200 rounded-xl divide-y divide-gray-100 bg-white">
+                    {(categoriesSummary.length > 0 ? categoriesSummary : availableCategories).length === 0 ? (
+                      <div className="p-6 text-center text-gray-400 text-xs">
+                        Aucune catégorie synchronisée.
+                      </div>
+                    ) : (
+                      (categoriesSummary.length > 0 ? categoriesSummary : availableCategories).map((cat, idx) => (
+                        <div key={idx} className="p-2.5 hover:bg-gray-50 flex items-center justify-between text-xs">
+                          <span className="font-bold text-gray-900">{cat.name}</span>
+                          <span className="text-[10px] font-mono text-gray-500 bg-gray-100 px-2 py-0.5 rounded">
+                            {cat.slug}
+                          </span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* TAB 6: SHIPPING & ORDERS */}
+              {activeSummaryTab === 'SHIPPING' && (
+                <div className="space-y-3 pt-1 text-xs">
+                  <div className="bg-stone-50 border border-stone-200 rounded-xl p-4 space-y-2">
+                    <h3 className="font-bold text-stone-900">🚚 Paramètres de livraison</h3>
+                    {shippingSummary ? (
+                      <p className="text-stone-700">
+                        {shippingSummary.zones} zones de livraison configurées avec un total de {shippingSummary.methods} méthodes de livraison associées.
+                      </p>
+                    ) : (
+                      <p className="text-stone-500">Aucune zone de livraison importée lors de cette session.</p>
+                    )}
+                  </div>
+
+                  <div className="bg-stone-50 border border-stone-200 rounded-xl p-4 space-y-2">
+                    <h3 className="font-bold text-stone-900">📦 Commandes historiques</h3>
+                    {ordersImportedCount !== null ? (
+                      <p className="text-stone-700">
+                        {ordersImportedCount} commandes importées avec leurs clients et adresses de facturation.
+                      </p>
+                    ) : (
+                      <p className="text-stone-500">Aucune commande historique importée lors de cette session.</p>
+                    )}
+                  </div>
+                </div>
+              )}
 
             </div>
 
             {/* Footer Buttons */}
-            <div className="pt-4 border-t border-gray-100 flex items-center justify-between gap-3">
-              {summaryStats.failed > 0 ? (
+            <div className="pt-4 border-t border-gray-100 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2 flex-wrap">
                 <button
                   type="button"
-                  onClick={handleCopyErrors}
-                  className="px-3.5 py-2 border border-gray-300 hover:bg-gray-100 text-gray-700 font-semibold rounded-xl text-xs transition flex items-center gap-1.5"
+                  onClick={handleCopyFullReport}
+                  className="px-3.5 py-2 bg-blue-50 hover:bg-blue-100 border border-blue-200 text-blue-800 font-bold rounded-xl text-xs transition flex items-center gap-1.5"
                 >
-                  <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" /></svg>
-                  <span>{copiedErrors ? '✓ Liste copiée !' : 'Copier les échecs'}</span>
+                  <span>📋</span>
+                  <span>{copiedFullReport ? '✓ Rapport complet copié !' : 'Copier le rapport complet'}</span>
                 </button>
-              ) : (
-                <div />
-              )}
+
+                {summaryStats.failed > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleCopyErrors}
+                    className="px-3.5 py-2 border border-gray-300 hover:bg-gray-100 text-gray-700 font-semibold rounded-xl text-xs transition flex items-center gap-1.5"
+                  >
+                    <span>✕</span>
+                    <span>{copiedErrors ? '✓ Liste copiée !' : 'Copier les échecs'}</span>
+                  </button>
+                )}
+              </div>
 
               <button
                 type="button"
