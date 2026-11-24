@@ -1,6 +1,6 @@
 import Image from 'next/image';
 import Link from 'next/link';
-import prisma from '@/lib/prisma';
+import { getCachedSettings } from '@/lib/cache';
 import HeroMobileSliderWrapper from './HeroMobileSliderWrapper';
 import HeroBlockSlider from './HeroBlockSlider';
 import { getTranslations } from 'next-intl/server';
@@ -8,8 +8,8 @@ import HeroPreviewEditButton from '@/components/admin/HeroPreviewEditButton';
 import { basicSanitizeHtml } from '@/lib/security';
 
 export default async function Hero({ config, isPreview, sectionId }: { config?: any, isPreview?: boolean, sectionId?: string }) {
-  const settingsDb = await prisma.setting.findMany();
-  let settings = settingsDb.reduce((acc, s) => ({ ...acc, [s.key]: s.value }), {} as Record<string, string>);
+  const cachedSettings = await getCachedSettings();
+  let settings = { ...cachedSettings };
 
   if (config) {
     settings = { ...settings, ...config };

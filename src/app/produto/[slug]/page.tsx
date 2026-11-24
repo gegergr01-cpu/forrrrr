@@ -1,4 +1,3 @@
-import prisma from '@/lib/prisma';
 import { notFound, permanentRedirect } from 'next/navigation';
 import Link from 'next/link';
 import ProductPageClient from '@/components/product/ProductPageClient';
@@ -7,10 +6,8 @@ import ProductReviews from '@/components/product/ProductReviews';
 import { createClient } from '@/utils/supabase/server';
 import { getTranslations } from 'next-intl/server';
 import { safeJsonLd } from '@/lib/security';
-
 import { Metadata } from 'next';
-
-import { getCachedProductBySlug, getCachedSettings, getCachedRelatedProducts } from '@/lib/cache';
+import { getCachedProductBySlug, getCachedSettings, getCachedRelatedProducts, getCachedDefaultShippingRate } from '@/lib/cache';
 import { getCategoryCanonicalPath } from '@/lib/categories';
 import { SITE_URL } from '@/lib/site';
 import Image from "next/image";
@@ -66,12 +63,8 @@ export default async function ProductPage({ params }: { params: Promise<{ slug: 
   const categoryIds = (product as any).categories?.map((c: any) => c.id) || [];
   const relatedProducts = await getCachedRelatedProducts(categoryIds, product.id);
 
-  // Lowest shipping rate for PT (default)
-  const ptZone = await prisma.shippingZone.findFirst({
-    where: { name: { in: ['PT', 'Portugal', 'DE'] }, isActive: true },
-    include: { methods: { where: { isActive: true }, orderBy: { rate: 'asc' } } }
-  });
-  const lowestShippingRate = ptZone?.methods?.[0]?.rate ?? 0;
+  // Lowest shipping rate for PT (default) - cached to avoid uncached DB hit per product view
+  const lowestShippingRate = await getCachedDefaultShippingRate();
 
   // Canonical category path for SEO
   const primaryCat = (product as any).categories?.[0];

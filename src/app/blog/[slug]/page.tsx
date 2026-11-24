@@ -2,7 +2,8 @@ import { notFound } from 'next/navigation';
 import prisma from '@/lib/prisma';
 import BlogSidebar from '@/components/blog/BlogSidebar';
 import CommentForm from '@/components/blog/CommentForm';
-import { getRecentComments, getArticleBySlug } from '@/actions/blog';
+import { getRecentComments } from '@/actions/blog';
+import { getCachedArticleBySlug, getCachedRecentArticles, ARTICLE_CARD_SELECT } from '@/lib/cache';
 import SafeHTML from '@/components/SafeHTML';
 import Link from 'next/link';
 import { getTranslations, getLocale } from 'next-intl/server';
@@ -12,19 +13,19 @@ import { safeJsonLd } from '@/lib/security';
 import { SITE_URL } from '@/lib/site';
 import Image from "next/image";
 
-export const dynamic = 'force-dynamic';
+export const revalidate = 3600;
 
 export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }): Promise<Metadata> {
   const { slug } = await params;
-  const article = await getArticleBySlug(slug);
-  
+  const article = await getCachedArticleBySlug(slug);
+
   if (!article || !article.isPublished) {
     const t = await getTranslations('Blog');
     return { title: t('article_not_found') };
   }
-  
+
   const description = article.metaDescription || article.excerpt || article.content.replace(/<[^>]*>?/gm, '').replace(/&nbsp;/g, ' ').substring(0, 160);
-  
+
   return {
     title: article.metaTitle || article.title,
     description: description,
@@ -49,35 +50,29 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
 }
 export default async function BlogDetailPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
-  const article = await getArticleBySlug(slug);
+  const article = await getCachedArticleBySlug(slug);
   const t = await getTranslations('Blog');
   const locale = await getLocale();
-  
+
   if (!article || !article.isPublished) {
     notFound();
   }
 
-  const recentArticles = await prisma.article.findMany({
-    where: { isPublished: true, id: { not: article.id } },
-    orderBy: { createdAt: 'desc' },
-    take: 5,
-    select: { id: true, title: true, slug: true }
-  });
-
-  const recentComments = await getRecentComments(5);
-
-  const relatedPosts = await prisma.article.findMany({
-    where: { isPublished: true, id: { not: article.id } },
-    orderBy: { createdAt: 'desc' },
-    take: 2,
-    include: { _count: { select: { comments: { where: { isApproved: true } } } } }
-  });
-
-  // Calculate next post
-  const nextPost = await prisma.article.findFirst({
-    where: { isPublished: true, createdAt: { gt: article.createdAt } },
-    orderBy: { createdAt: 'asc' }
-  });
+  const [recentArticles, recentComments, relatedPosts, nextPost] = await Promise.all([
+    getCachedRecentArticles(5),
+    getRecentComments(5),
+    prisma.article.findMany({
+      where: { isPublished: true, id: { not: article.id } },
+      orderBy: { createdAt: 'desc' },
+      take: 2,
+      select: ARTICLE_CARD_SELECT
+    }),
+    prisma.article.findFirst({
+      where: { isPublished: true, createdAt: { gt: article.createdAt } },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true, title: true, slug: true }
+    })
+  ]);
 
   const baseUrl = SITE_URL;
   const storeName = process.env.NEXT_PUBLIC_STORE_NAME || 'Lenha & Carvao Silva Dias';
@@ -141,22 +136,22 @@ export default async function BlogDetailPage({ params }: { params: Promise<{ slu
       />
       <div className="max-w-7xl mx-auto px-4 w-full">
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-          
+
           {/* Main Content */}
           <div className="lg:col-span-8">
             <div className="bg-white p-8 md:p-12 rounded-lg border border-gray-200 shadow-sm">
-              
+
               {/* Header */}
               {article.category && (
                 <span className="inline-block px-3 py-1 bg-orange-50 text-orange-700 text-xs font-semibold rounded-full mb-4">
                   {article.category}
                 </span>
               )}
-              
+
               <h1 className="text-3xl md:text-4xl font-bold text-gray-900 mb-6 leading-tight">
                 {article.title}
               </h1>
-              
+
               <div className="flex items-center text-sm text-gray-500 mb-8 pb-8 border-b border-gray-100 flex-wrap gap-4">
                 {article.authorName && (
                   <span className="flex items-center gap-1 font-medium text-gray-700">
@@ -182,7 +177,7 @@ export default async function BlogDetailPage({ params }: { params: Promise<{ slu
               )}
 
               {/* Rich Content */}
-              <SafeHTML 
+              <SafeHTML
                 html={article.content}
                 className="prose prose-orange max-w-none w-full overflow-hidden text-gray-700 leading-relaxed"
               />
@@ -197,7 +192,7 @@ export default async function BlogDetailPage({ params }: { params: Promise<{ slu
                     <button className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-gray-600 hover:bg-orange-50 hover:text-orange-700 transition">t</button>
                     <button className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-gray-600 hover:bg-orange-50 hover:text-orange-700 transition">in</button>
                   </div>
-                  
+
                   {nextPost && (
                     <div className="text-right">
                       <div className="text-xs text-gray-500 uppercase tracking-wider mb-1">{t('next_article')}</div>
@@ -217,7 +212,7 @@ export default async function BlogDetailPage({ params }: { params: Promise<{ slu
                   <h3 className="text-xl font-bold text-gray-900">{t('related_post')}</h3>
                   <div className="h-px bg-gray-200 flex-1"></div>
                 </div>
-                
+
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   {relatedPosts.map(post => (
                     <Link href={`/blog/${post.slug}`} key={post.id} className="bg-white p-6 rounded-lg border border-gray-200 group hover:border-orange-200 transition h-full flex flex-col">
@@ -232,7 +227,7 @@ export default async function BlogDetailPage({ params }: { params: Promise<{ slu
                         {post.title}
                       </h4>
                       <p className="text-sm text-gray-600 line-clamp-2 flex-1 mb-4">
-                        {post.excerpt || post.content.replace(/<[^>]*>?/gm, '').replace(/&nbsp;/g, ' ').substring(0, 100) + '...'}
+                        {post.excerpt || ''}
                       </p>
                       <div className="flex items-center text-xs text-gray-500 gap-4 mt-auto">
                         <span className="flex items-center gap-1">

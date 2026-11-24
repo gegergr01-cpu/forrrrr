@@ -2,12 +2,14 @@ import React from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
 import prisma from '@/lib/prisma';
+import { ARTICLE_CARD_SELECT } from '@/lib/cache';
 
 export default async function HeatingGuideBlogs() {
   let articles: any[] = [];
   try {
     articles = await prisma.article.findMany({
       where: { isPublished: true },
+      select: ARTICLE_CARD_SELECT,
       orderBy: { createdAt: 'desc' },
       take: 3
     });

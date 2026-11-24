@@ -1,11 +1,11 @@
 import Link from 'next/link';
-import prisma from '@/lib/prisma';
 import BlogSidebar from '@/components/blog/BlogSidebar';
 import { getRecentComments } from '@/actions/blog';
 import { getTranslations, getLocale } from 'next-intl/server';
 import Image from "next/image";
+import { getCachedBlogArticles, getCachedRecentArticles } from '@/lib/cache';
 
-export const dynamic = 'force-dynamic';
+export const revalidate = 3600;
 
 export default async function BlogIndexPage({
   searchParams,
@@ -15,32 +15,20 @@ export default async function BlogIndexPage({
   const query = searchParams.q || '';
   const t = await getTranslations('Blog');
   const locale = await getLocale();
-  
-  const articles = await prisma.article.findMany({
-    where: {
-      isPublished: true,
-      ...(query ? { title: { contains: query, mode: 'insensitive' } } : {})
-    },
-    orderBy: { createdAt: 'desc' },
-    include: { _count: { select: { comments: { where: { isApproved: true } } } } }
-  });
 
-  const recentArticles = await prisma.article.findMany({
-    where: { isPublished: true },
-    orderBy: { createdAt: 'desc' },
-    take: 5,
-    select: { id: true, title: true, slug: true }
-  });
-
-  const recentComments = await getRecentComments(5);
+  const [articles, recentArticles, recentComments] = await Promise.all([
+    getCachedBlogArticles(query),
+    getCachedRecentArticles(5),
+    getRecentComments(5)
+  ]);
 
   return (
     <div className="bg-gray-50 min-h-screen py-12">
       <div className="max-w-7xl mx-auto px-4 w-full">
         <h1 className="text-4xl font-bold text-gray-900 mb-8 font-sans text-center">{t('title')}</h1>
-        
+
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-          
+
           {/* Main Content: Blog List */}
           <div className="lg:col-span-8 space-y-8">
             {articles.length === 0 ? (
@@ -52,7 +40,7 @@ export default async function BlogIndexPage({
                 <div key={article.id} className="bg-white rounded-lg border border-gray-200 overflow-hidden shadow-sm flex flex-col md:flex-row h-full md:h-64 group">
                   <div className="md:w-2/5 h-48 md:h-full bg-gray-100 flex-shrink-0 relative overflow-hidden">
                     {article.image ? (
-                       <Image width={800} height={800} src={article.image} alt={article.title} className="w-full h-full object-cover group-hover:scale-105 transition duration-500" />
+                      <Image width={800} height={800} src={article.image} alt={article.title} className="w-full h-full object-cover group-hover:scale-105 transition duration-500" />
                     ) : (
                       <div className="w-full h-full flex items-center justify-center text-4xl text-gray-300">📝</div>
                     )}
@@ -79,7 +67,7 @@ export default async function BlogIndexPage({
                       </span>
                     </div>
                     <p className="text-sm text-gray-600 line-clamp-3 mb-4 flex-1">
-                      {article.excerpt || article.content.replace(/<[^>]*>?/gm, '').replace(/&nbsp;/g, ' ').substring(0, 150) + '...'}
+                      {article.excerpt || ''}
                     </p>
                     <Link href={`/blog/${article.slug}`} className="inline-block mt-auto bg-orange-600 hover:bg-orange-700 text-white font-bold py-2 px-6 rounded transition self-start">
                       {t('read_more')}
